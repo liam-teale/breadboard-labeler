@@ -67,6 +67,7 @@ you can chain click, type, click, type without pressing Enter.
 ## Development
 
 Plain HTML, CSS and JavaScript in `docs/`, served by GitHub Pages from `main`. No build step.
-`web-test/harness.html` is the self-test: serve the repo root (`python -m http.server`) and open
-it in a browser, or drive it headless. An earlier Python desktop version lives in the git history
+`web-test/harness.html` is the self-test: serve the repo root (`python -m http.server 8765`) and open
+it in a browser, or drive it headless. `web-test/sw-check.mjs` proves the offline story: run it with
+`online` while the server is up, stop the server, then run it with `offline` (it blocks the CDN too). An earlier Python desktop version lives in the git history
 before the "Retire the desktop version" commit.

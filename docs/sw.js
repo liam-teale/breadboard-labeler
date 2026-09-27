@@ -1,5 +1,5 @@
 // Offline support: network first so updates arrive promptly, cache as a fallback.
-const CACHE = 'bbl-v3';
+const CACHE = 'bbl-v4';
 const SHELL = ['./', './index.html', './app.js', './style.css', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png'];
 
@@ -13,21 +13,26 @@ self.addEventListener('activate', (e) => {
     .then(() => self.clients.claim()));
 });
 
+// Store a copy of a network response. The clone MUST happen synchronously,
+// before the original is returned to the page, or its body is already consumed.
+function store(e, res) {
+  if (!res.ok) return res;
+  const copy = res.clone();
+  e.waitUntil(caches.open(CACHE).then((c) => c.put(e.request, copy)));
+  return res;
+}
+
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
   if (e.request.url.startsWith('https://cdn.jsdelivr.net/')) {
     // versioned decoder: cache first so HEIC keeps working offline after the first use
-    e.respondWith(caches.match(e.request).then((r) => r || fetch(e.request).then((res) => {
-      caches.open(CACHE).then((c) => c.put(e.request, res.clone()));
-      return res;
-    })));
+    e.respondWith(caches.match(e.request).then((r) => r || fetch(e.request).then((res) => store(e, res)))
+      .catch(() => Response.error()));   // offline and not cached yet: fail quietly, like a normal failed fetch
     return;
   }
   if (!e.request.url.startsWith(self.location.origin)) return;
   e.respondWith(
-    fetch(e.request).then((res) => {
-      if (res.ok) caches.open(CACHE).then((c) => c.put(e.request, res.clone()));
-      return res;
-    }).catch(() => caches.match(e.request, { ignoreSearch: true }).then((r) => r || caches.match('./index.html')))
+    fetch(e.request).then((res) => store(e, res))
+      .catch(() => caches.match(e.request, { ignoreSearch: true }).then((r) => r || caches.match('./index.html')))
   );
 });
