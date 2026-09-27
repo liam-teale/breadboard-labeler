@@ -23,7 +23,7 @@ Keys (when not typing a label):
     Enter / Esc      place / cancel the label you are typing
     S                save this image and go to the next one
     N / P            next / previous image without saving
-    O                open more images
+    O / F            open more photos / a whole folder
     Z / Y            undo / redo
     Delete           delete the selected label
     + / -            bigger / smaller text (remembered for next time)
@@ -32,7 +32,9 @@ Keys (when not typing a label):
     K                pick any colour (same)
     Q                quit
 
-Output: <name>_labeled.<ext> next to the original. Labels are also kept in
+Output: <name>_labeled.<ext> next to the original. Originals are never
+modified and no existing file is ever overwritten: saving again makes
+<name>_labeled_2.<ext>, and so on. Labels are also kept in
 <folder>/.labeler/<name>.json so reopening an image restores them.
 """
 from __future__ import annotations
@@ -41,6 +43,7 @@ import argparse
 import copy
 import json
 import math
+import re
 import sys
 import tkinter as tk
 from dataclasses import asdict, dataclass
@@ -124,14 +127,29 @@ def sidecar_path(image_path: Path) -> Path:
 
 
 def output_path(image_path: Path, style: Style) -> Path:
+    """The first output name for this photo (may already exist from an earlier save)."""
     ext = image_path.suffix
     if ext.lower() not in {".jpg", ".jpeg", ".png"}:
         ext = ".png"
     return image_path.with_name(image_path.stem + style.suffix + ext)
 
 
+def unique_path(path: Path) -> Path:
+    """path itself if free, else path_2, path_3, ... - never an existing file."""
+    if not path.exists():
+        return path
+    for n in range(2, 10000):
+        candidate = path.with_name(f"{path.stem}_{n}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"too many copies of {path.name}")
+
+
 def is_image(p: Path, style: Style) -> bool:
-    return p.suffix.lower() in IMAGE_EXTS and not p.stem.endswith(style.suffix)
+    """An original photo: image extension, and not one of our outputs (<stem>_labeled, <stem>_labeled_2, ...)."""
+    if p.suffix.lower() not in IMAGE_EXTS:
+        return False
+    return re.search(re.escape(style.suffix) + r"(_\d+)?$", p.stem) is None
 
 
 def list_images(targets: list[Path], style: Style) -> list[Path]:
@@ -154,9 +172,14 @@ def list_images(targets: list[Path], style: Style) -> list[Path]:
 
 def ask_for_images() -> list[Path]:
     names = filedialog.askopenfilenames(
-        title="Pick the photos to label (Ctrl/Shift-click for several)",
+        title="Pick the photos to label (Ctrl/Shift-click for several, Cancel to pick a folder instead)",
         filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp *.webp *.tif *.tiff"), ("All files", "*.*")])
     return [Path(n) for n in names]
+
+
+def ask_for_folder() -> list[Path]:
+    chosen = filedialog.askdirectory(title="Folder of photos to label")
+    return [Path(chosen)] if chosen else []
 
 
 # --------------------------------------------------------------------------- #
@@ -354,8 +377,12 @@ class App:
         sc.write_text(json.dumps({"labels": [asdict(l) for l in self.labels]}, indent=2), "utf-8")
 
     def save(self) -> Path:
+        """Write a NEW file next to the original. Never touches the original,
+        never overwrites an earlier save."""
         assert self.full is not None
-        out = output_path(self.path, self.style)
+        out = unique_path(output_path(self.path, self.style))
+        if out.resolve() == self.path.resolve():
+            raise RuntimeError("refusing to overwrite the original photo")
         final = render(self.full, self.labels, self.style)
         if out.suffix.lower() in {".jpg", ".jpeg"}:
             final.save(out, quality=95)
@@ -383,9 +410,10 @@ class App:
         else:
             self.flash("No more images that way." if delta > 0 else "This is the first image.")
 
-    def open_more(self) -> None:
+    def open_more(self, folder: bool = False) -> None:
         have = {q.resolve() for q in self.images}
-        new = [p for p in list_images(ask_for_images(), self.style) if p.resolve() not in have]
+        picked = ask_for_folder() if folder else ask_for_images()
+        new = [p for p in list_images(picked, self.style) if p.resolve() not in have]
         if new:
             self.images += new
             self.flash(f"Added {len(new)} image(s); {len(self.images)} in the queue.")
@@ -446,7 +474,7 @@ class App:
                f"labels: {len(self.labels)}{'*' if self.dirty else ''}{sel}    "
                f"text {self.style.font_pct:.2g}%  square {self.style.marker_pct:.2g}%  colour {self.style.fill}    "
                f"|  click part = label   drag = choose text spot   shift-click = text only   dbl-click = edit   "
-               f"S save+next   N/P   O open   Z/Y undo/redo   Del   +/- text   [/] square   C/K colour   Q quit")
+               f"S save+next   N/P   O/F open photos/folder   Z/Y undo/redo   Del   +/- text   [/] square   C/K colour   Q quit")
         if extra:
             msg = extra + "    |    " + msg
         self.status.config(text=msg)
@@ -690,6 +718,8 @@ class App:
             self.step(-1)
         elif k == "o":
             self.open_more()
+        elif k == "f":
+            self.open_more(folder=True)
         elif k == "z":
             self.undo()
         elif k == "y":
@@ -753,6 +783,9 @@ def main(argv: list[str] | None = None) -> int:
         pass
 
     style = Style.load({"font_pct": args.font_pct, "fill": args.fill, "suffix": args.suffix})
+    if not style.suffix:
+        print("The output suffix must not be empty: outputs would replace the originals.", file=sys.stderr)
+        return 1
     if args.fill:
         style.fill = args.fill.upper()
     targets = [Path(t) for t in args.targets]
@@ -764,7 +797,7 @@ def main(argv: list[str] | None = None) -> int:
     root = tk.Tk()
     root.withdraw()
     if not targets:
-        targets = ask_for_images()
+        targets = ask_for_images() or ask_for_folder()     # cancel the file picker to get a folder picker
     images = list_images(targets, style) if targets else []
     if not images:
         if targets:

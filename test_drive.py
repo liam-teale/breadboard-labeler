@@ -112,9 +112,12 @@ def run():
     check([p.name for p in picked] == ["IMG_0002.png", "IMG_0001.jpg"],
           f"picked files keep their order, drop duplicates and non-images: {[p.name for p in picked]}")
     images = li.list_images([f1, f2, f3], style)
+    before = {n: (WORK / n).stat().st_size for n in ("IMG_0001.jpg", "IMG_0002.png", "zz_third.jpg", "extra.png")}
+    before_m = {n: (WORK / n).stat().st_mtime for n in before}
 
     # dialogs are replaced so the test never opens a native window
     li.ask_for_images = lambda: [f4]
+    li.ask_for_folder = lambda: [WORK]
     li.colorchooser.askcolor = lambda **kw: ((255, 0, 255), "#ff00ff")
 
     root = tk.Tk()
@@ -376,7 +379,10 @@ def run():
     at(nxt(200), lambda: check(app.index == 1 and [l.text for l in app.labels] == ["220 Ω", "ATmega328"],
                                f"P goes back and reloads saved labels: {[l.text for l in app.labels]}"))
     at(t[0], lambda: check("[already labeled]" in app.status.cget("text"), "status marks already-labeled image"))
-    at(nxt(), lambda: key("p"))
+    at(nxt(), lambda: key("s"))
+    at(nxt(200), lambda: check((WORK / "IMG_0002_labeled_2.png").exists() and (WORK / "IMG_0002_labeled.png").exists(),
+                               "saving again writes a new copy instead of overwriting the first"))
+    at(nxt(), lambda: key("p")); at(nxt(200), lambda: key("p"))
     at(nxt(200), lambda: check(len(app.labels) == 6 and app.labels[0].fill == "#FF00FF" and app.labels[0].marker == 3.5,
                                f"image 1 labels reload with their colours and square sizes: {len(app.labels)}"))
     at(nxt(), lambda: key("n")); at(nxt(200), lambda: key("n"))
@@ -384,9 +390,10 @@ def run():
     at(nxt(), lambda: key("n"))
     at(nxt(), lambda: check(app.index == 2 and "No more" in app.status.cget("text"), "N past the end just flashes"))
     # O adds more images to the queue
+    at(nxt(), lambda: key("f"))
+    at(nxt(), lambda: check(len(app.images) == 4 and app.images[-1].name == "extra.png" and "Added 1" in app.status.cget("text"),
+                            f"F adds the folder's not-yet-queued photos, skipping *_labeled outputs: {[p.name for p in app.images]}"))
     at(nxt(), lambda: key("o"))
-    at(nxt(), lambda: check(len(app.images) == 4 and app.images[-1] == f4 and "Added 1" in app.status.cget("text"),
-                            "O appends the picked image to the queue"))
     at(nxt(), lambda: key("o"))
     at(nxt(), lambda: check(len(app.images) == 4 and "Nothing new" in app.status.cget("text"), "O ignores images already queued"))
     at(nxt(), lambda: click(0.5, 0.5))
@@ -412,6 +419,10 @@ def run():
     root.mainloop()
 
     # ---- offline checks on the saved files -----------------------------------
+    check(all((WORK / n).stat().st_size == before[n] and (WORK / n).stat().st_mtime == before_m[n] for n in before),
+          "original photos are byte-for-byte untouched")
+    check(li.unique_path(WORK / "IMG_0002_labeled.png").name == "IMG_0002_labeled_3.png", "unique_path skips existing copies")
+    check(li.unique_path(WORK / "nothing_here.png").name == "nothing_here.png", "unique_path keeps a free name")
     im = Image.open(li.output_path(f1, style))
     check(im.size == (4000, 3000), f"saved image keeps full resolution and upright orientation: {im.size}")
     sc = json.loads(li.sidecar_path(f1).read_text("utf-8"))
@@ -447,10 +458,15 @@ def run():
         check(li.main([str(f2), str(f1)]) == 0, "main() accepts a list of files")
         check(li.main([str(WORK)]) == 0, "main() accepts a folder")
         li.ask_for_images = lambda: []
-        check(li.main([]) == 1, "main() with no files and a cancelled dialog exits quietly")
+        li.ask_for_folder = lambda: []
+        check(li.main([]) == 1, "main() with both pickers cancelled exits quietly")
         li.ask_for_images = lambda: [f3]
         check(li.main([]) == 0, "main() with no args uses the file dialog")
         check(li.main([r"C:\nope\nothing.jpg"]) == 1, "main() reports a missing file")
+        check(li.main([str(f2), "--suffix", ""]) == 1, "main() refuses an empty suffix (would overwrite originals)")
+        li.ask_for_images = lambda: []
+        li.ask_for_folder = lambda: [WORK]
+        check(li.main([]) == 0, "cancelling the file picker falls back to the folder picker")
     finally:
         tk.Tk.geometry, tk.Tk.mainloop = orig_geometry, orig_loop
     print()

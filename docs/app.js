@@ -1,7 +1,8 @@
 // Breadboard labeler - browser version.
 // A label is: text on a solid coloured box, a solid square on the part it
 // refers to, and a line joining them. Everything runs in the browser; photos
-// never leave the device.
+// never leave the device, and the original files are never modified: saving
+// always downloads a new *_labeled copy.
 
 export const COLOURS = ['#FFEB3B', '#FFFFFF', '#000000', '#FF3B30', '#00E5FF', '#76FF03'];
 const STYLE_KEY = 'bbl.style';
@@ -99,7 +100,8 @@ const HELP = [
   ['Click a label', 'select it'],
   ['Double-click a label', 'edit its text'],
   ['Enter / Esc', 'place / cancel the text you are typing'],
-  ['S', 'save this photo (downloads name_labeled) and go to the next'],
+  ['S', 'save this photo (downloads a new name_labeled copy) and go to the next'],
+  ['O / F', 'open more photos / a whole folder'],
   ['N / P', 'next / previous photo'],
   ['Z / Y', 'undo / redo'],
   ['Delete', 'delete the selected label'],
@@ -134,6 +136,7 @@ export class Labeler {
     c.innerHTML = `
       <div class="bbl-toolbar">
         <label class="bbl-btn bbl-primary">Open photos<input type="file" accept="image/*" multiple hidden></label>
+        <label class="bbl-btn bbl-folder">Open folder<input type="file" class="bbl-folder-input" webkitdirectory multiple hidden></label>
         <button data-act="prev" title="Previous (P)">&#9664;</button>
         <span class="bbl-count"></span>
         <button data-act="next" title="Next (N)">&#9654;</button>
@@ -160,6 +163,8 @@ export class Labeler {
         <div class="bbl-help" hidden>${HELP.map(([k, v]) => `<div><b>${k}</b><span>${v}</span></div>`).join('')}</div>
       </div>`;
     this.fileInput = c.querySelector('input[type=file]');
+    this.folderInput = c.querySelector('.bbl-folder-input');
+    if (!('webkitdirectory' in this.folderInput)) c.querySelector('.bbl-folder').hidden = true;   // e.g. iOS Safari
     this.canvas = c.querySelector('.bbl-canvas');
     this.ctx = this.canvas.getContext('2d');
     this.entryEl = c.querySelector('.bbl-entry');
@@ -181,6 +186,7 @@ export class Labeler {
   bind() {
     const c = this.container;
     this.fileInput.addEventListener('change', () => { this.openFiles(this.fileInput.files); this.fileInput.value = ''; });
+    this.folderInput.addEventListener('change', () => { this.openFiles(this.folderInput.files); this.folderInput.value = ''; });
     c.querySelector('.bbl-toolbar').addEventListener('click', (e) => {
       const b = e.target.closest('button'); if (!b) return;
       if (b.dataset.colour) { this.applyColour(b.dataset.colour); return; }
@@ -224,8 +230,11 @@ export class Labeler {
   get current() { return this.images[this.index] || null; }
 
   async openFiles(files) {
-    const list = Array.from(files || []).filter((f) => f.type.startsWith('image/') && !/_labeled\.[^.]+$/i.test(f.name));
-    if (!list.length) return;
+    // A folder pick includes everything inside it; keep only images and skip earlier outputs.
+    const list = Array.from(files || [])
+      .filter((f) => f.type.startsWith('image/') && !/_labeled(_\d+)?\.[^.]+$/i.test(f.name))
+      .sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name, undefined, { numeric: true }));
+    if (!list.length) { this.flash('No photos found there.'); return; }
     const firstNew = this.images.length;
     for (const f of list) {
       const key = `${f.name}|${f.size}|${f.lastModified}`;
@@ -590,7 +599,7 @@ export class Labeler {
       '+': () => this.adjustFont(0.25), '=': () => this.adjustFont(0.25), '-': () => this.adjustFont(-0.25), '_': () => this.adjustFont(-0.25),
       '[': () => this.adjustMarker(-0.25), ']': () => this.adjustMarker(0.25),
       c: () => this.cycleColour(), k: () => this.colourInput.click(),
-      o: () => this.fileInput.click(), '?': () => this.action('help'),
+      o: () => this.fileInput.click(), f: () => this.folderInput.click(), '?': () => this.action('help'),
     };
     if (e.ctrlKey && !['z', 'y'].includes(k)) return;
     if (acts[k]) { e.preventDefault(); acts[k](); }

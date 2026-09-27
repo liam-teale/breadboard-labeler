@@ -56,9 +56,12 @@
       const f1 = await toFile(makeBoard(4000, 3000), 'IMG_0001.jpg', 'image/jpeg');
       const f2 = await toFile(makeBoard(1200, 800), 'IMG_0002.png', 'image/png');
       const f3 = await toFile(makeBoard(800, 600), 'IMG_0001_labeled.jpg', 'image/jpeg');
-      await app.openFiles([f1, f2, f3]);
+      const f4 = await toFile(makeBoard(800, 600), 'IMG_0001_labeled_2.jpg', 'image/jpeg');
+      const notes = new File(['hi'], 'notes.txt', { type: 'text/plain' });
+      await app.openFiles([f1, f2, f3, f4, notes]);
       await tick();
-      check(app.images.length === 2 && app.images[0].name === 'IMG_0001.jpg', `opens images, skips *_labeled: ${app.images.map((i) => i.name)}`);
+      check(app.images.length === 2 && app.images[0].name === 'IMG_0001.jpg', `opens images, skips *_labeled and non-images: ${app.images.map((i) => i.name)}`);
+      check(!!app.folderInput && app.folderInput.hasAttribute('webkitdirectory'), 'folder picker present');
       check(app.current.width === 4000 && app.scale < 1, `large image scaled to fit: ${app.scale.toFixed(3)}`);
 
       const c = app.canvas;
@@ -199,6 +202,16 @@
       check(app2.current.labels.length === 6 && app2.current.labels[2].text === 'VCC 5V', 'reopening a photo restores its labels');
       check(app2.style.markerPct === 2.5 && app2.style.fontPct === 3.25, 'style restored in a fresh instance');
       app2.container.remove();
+      // a "folder" pick: files carry webkitRelativePath; sorted naturally, outputs and non-images dropped
+      const app3 = new Labeler(document.createElement('div'));
+      document.body.appendChild(app3.container);
+      const mk = async (name, rel) => { const f = await toFile(makeBoard(300, 200), name, 'image/png'); Object.defineProperty(f, 'webkitRelativePath', { value: rel }); return f; };
+      await app3.openFiles([await mk('b10.png', 'lab/b10.png'), await mk('b2.png', 'lab/b2.png'), await mk('a_labeled.png', 'lab/a_labeled.png'), await mk('a.png', 'lab/a.png')]);
+      await tick();
+      check(app3.images.map((i) => i.name).join() === 'a.png,b2.png,b10.png', `folder pick keeps originals in natural order: ${app3.images.map((i) => i.name)}`);
+      app3.container.remove();
+      const f1bytes = await f1.arrayBuffer();
+      check(f1bytes.byteLength === f1.size, 'original File object is untouched');
 
       // screenshot state for a visual check
       app.load(0); app.selected = 0; app.refresh();

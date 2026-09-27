@@ -13,11 +13,14 @@ part it refers to, and a straight line joining them.
 Runs entirely in the browser. Photos never leave your device. Works on phones and tablets,
 and can be installed as an app (Chrome: menu, "Install app"; iPhone: Share, "Add to Home Screen").
 
-1. Open photos (or drop them on the page).
+1. **Open photos** to pick individual photos, or **Open folder** to take every photo in a folder
+   (or drop files on the page).
 2. **Tap the part.** The square lands there and a text box opens beside it. Type, Enter.
    Or **drag** from the part to where the text should go.
 3. **Drag the text** or **the square** to move them. **Tap a label** to select it, **double-tap** to edit.
-4. **Save** downloads `name_labeled.jpg` and moves to the next photo. **Save all** downloads every labelled photo.
+4. **Save** downloads a new `name_labeled.jpg` and moves to the next photo. **Save all** downloads every labelled photo.
+
+Your original photos are never modified. Every save is a new download.
 
 Undo/redo, text size, square size and colour are toolbar buttons. Press `?` for the key list
 (same keys as the desktop version below). Labels are remembered per photo in your browser, so
@@ -29,6 +32,7 @@ The web app lives in `docs/` and is plain HTML, CSS and JavaScript with no build
 ## Desktop version (Python)
 
 1. Double-click `label.bat`. A file picker opens: Ctrl-click or Shift-click the photos you want.
+   Press Cancel there to get a folder picker instead. Inside the app, **O** opens more photos and **F** a folder.
 2. For each photo:
    - **Click the part.** The square lands there and a text box opens beside it. Type, **Enter**.
    - **Or drag:** press on the part, drag to where the text should sit, release, type, **Enter**.
@@ -52,7 +56,7 @@ Needs Python 3 with Pillow: `pip install pillow`. tkinter ships with Python on W
 | Esc | cancel the label you are typing, or clear the selection |
 | S | save and go to next photo |
 | N / P (or arrow keys) | next / previous photo without saving |
-| O | open more photos into the queue |
+| O / F | open more photos / a whole folder into the queue |
 | Z / Y | undo / redo |
 | Delete | delete the selected label |
 | + / - | bigger / smaller text (remembered for next week) |
@@ -71,12 +75,13 @@ you can chain click, type, click, type without pressing Enter.
 
 ## What the desktop version writes
 
-- `photo_labeled.jpg` (or `.png`) next to each original. Originals are never touched.
+- `photo_labeled.jpg` (or `.png`) next to each original. Originals are never touched, and no file is ever
+  overwritten: saving the same photo again writes `photo_labeled_2.jpg`, then `_3`, and so on.
 - `.labeler/photo.json` in the same folder: the labels, positions, colours and square sizes.
   Reopening a photo reloads them so you can move one, fix a typo, and press S again.
 - `~/.breadboard_labeler.json`: your text size, square size and colour, so they stick between runs.
 
-Files already ending in `_labeled` are skipped, so you can rerun on the same folder safely.
+Earlier outputs (`_labeled`, `_labeled_2`, ...) are skipped when opening, so you can rerun on the same folder safely.
 
 ## Details
 
