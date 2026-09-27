@@ -21,6 +21,17 @@ const OUTPUT_NAME = /_labeled(_\d+)?\.[^.]+$/i;
 // File System Access API (Chrome, Edge): durable file/folder handles that survive a
 // reload, and permission to write labelled copies next to the originals.
 export const FS_ACCESS = typeof window !== 'undefined' && typeof window.showOpenFilePicker === 'function';
+// Session memory: opened originals are copied into the browser's private storage (OPFS) so a
+// reload or a discarded tab can reopen them with no prompt, on any browser that has OPFS.
+// Copies older than CACHE_MAX_AGE are discarded at startup.
+export const CACHE_MAX_AGE = 14 * 24 * 60 * 60 * 1000;
+const SESSIONS = typeof indexedDB !== 'undefined';
+const OPFS = typeof navigator !== 'undefined' && !!navigator.storage && typeof navigator.storage.getDirectory === 'function';
+async function opfsDir(name) {
+  const root = await navigator.storage.getDirectory();
+  return root.getDirectoryHandle(name, { create: true });
+}
+function cacheNameFor(key) { return key.replace(/[^A-Za-z0-9._-]/g, '_'); }
 const PICKER_TYPES = [{ description: 'Photos', accept: { 'image/*': ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tif', '.tiff', '.heic', '.heif'] } }];
 
 function idb() {
@@ -170,6 +181,8 @@ export class Labeler {
     this.press = null; this.mode = null; this.moved = false; this.grab = [0, 0];
     this.rubber = null;
     this.base = null;            // screen-sized copy of the current photo, redrawn from on every refresh
+    this.cacheJobs = [];         // in-flight copies of originals into OPFS
+    this._cacheChain = Promise.resolve();
     this._raf = 0;
     this._loadToken = 0;
     this.entry = null;
@@ -366,11 +379,14 @@ export class Labeler {
       const stored = this.saved[key];
       // Photos are decoded on demand (see ensure/trim): a 12 MP photo is ~48 MB decoded,
       // so only the current one and its neighbours are kept in memory.
-      this.images.push({
+      const im = {
         name: f.name, type: f.type, key, file: f, handle: e.handle || null, dir: e.dir || null, path: e.path || null,
+        cacheName: cacheNameFor(key), cached: !!e.fromCache,
         bitmap: null, decoding: null, broken: false, width: 0, height: 0,
         labels: stored ? stored.map((l) => ({ ...l })) : [], undo: [], redo: [], dirty: false,
-      });
+      };
+      this.images.push(im);
+      if (!im.cached) this.cacheJobs.push(this.writeCache(im));
     }
     if (this.index < 0 && this.images.length) await this.load(0);
     else this.refresh();                 // redraw first: flash() must be the last thing to touch the status line
@@ -422,37 +438,98 @@ export class Labeler {
     return out;
   }
 
-  /** Remember the open handles and position so a reload (or a discarded tab) can pick up where you left off. */
+  /** Copy an original into OPFS so it can be reopened later without the file handle. */
+  async writeCache(im) {
+    if (!OPFS) return false;
+    try {
+      const dir = await opfsDir('cache');
+      const fh = await dir.getFileHandle(im.cacheName, { create: true });
+      if (typeof fh.createWritable !== 'function') return false;   // e.g. Safari on the main thread
+      const w = await fh.createWritable();
+      await w.write(im.file);
+      await w.close();
+      im.cached = true;
+      await this.updateCacheIndex((index) => { index[im.cacheName] = Date.now(); });
+      return true;
+    } catch (err) { console.warn('could not cache', im.name, err); return false; }
+  }
+
+  /** Serialised read-modify-write of the {cacheName: cachedAt} index kept in IndexedDB. */
+  updateCacheIndex(mutate) {
+    this._cacheChain = this._cacheChain.then(async () => {
+      const index = (await idbGet('cache')) || {};
+      mutate(index);
+      await idbSet('cache', index);
+    }).catch((err) => console.warn('cache index', err));
+    return this._cacheChain;
+  }
+
+  /** Resolves once every opened photo has been copied into the cache. */
+  whenCached() { return Promise.all(this.cacheJobs).then(() => this._cacheChain); }
+
+  async readCache(item) {
+    if (!OPFS || !item.cache) return null;
+    try {
+      const dir = await opfsDir('cache');
+      const f = await (await dir.getFileHandle(item.cache)).getFile();
+      return new File([f], item.name, { type: item.type, lastModified: item.lastModified });
+    } catch { return null; }
+  }
+
+  /** Drop cached copies older than CACHE_MAX_AGE (and any file the index does not know about). */
+  async pruneCache(now = Date.now()) {
+    if (!OPFS) return 0;
+    let removed = 0;
+    try {
+      const dir = await opfsDir('cache');
+      await this.updateCacheIndex(() => {});
+      const index = (await idbGet('cache')) || {};
+      const present = new Set();
+      for await (const [name] of dir.entries()) {
+        present.add(name);
+        const at = index[name];
+        if (!at || now - at > CACHE_MAX_AGE) { await dir.removeEntry(name); removed++; delete index[name]; }
+      }
+      for (const name of Object.keys(index)) if (!present.has(name)) delete index[name];
+      await idbSet('cache', index);
+    } catch (err) { console.warn('prune', err); }
+    return removed;
+  }
+
+  /** Remember what is open and where you are, so a reload (or a discarded tab) can pick up where you left off. */
   async saveSession() {
-    if (!FS_ACCESS) return;
+    if (!SESSIONS) return;
     const dirs = [], items = [];
     for (const im of this.images) {
+      const it = { key: im.key, name: im.name, type: im.type, lastModified: im.file.lastModified, cache: im.cacheName, path: im.path };
       if (im.dir) {
         let di = dirs.indexOf(im.dir);
         if (di < 0) { di = dirs.length; dirs.push(im.dir); }
-        items.push({ dir: di, path: im.path });
-      } else if (im.handle) items.push({ handle: im.handle });
+        it.dir = di;
+      } else if (im.handle) it.handle = im.handle;
+      items.push(it);
     }
-    if (!items.length) return;           // opened through the fallback picker: nothing restorable
+    if (!items.length) return;
     try { await idbSet('session', { dirs, items, index: Math.max(0, this.index), savedAt: Date.now() }); }
     catch (err) { console.warn('session not saved', err); }
   }
 
   async clearSession() { try { await idbSet('session', null); } catch { /* ignore */ } }
 
-  /** On startup: reopen silently if permission is still granted, otherwise offer a button. */
+  /** On startup: prune old copies, then reopen silently if possible, otherwise offer a button. */
   async checkSession() {
-    if (!FS_ACCESS) return;
+    if (!SESSIONS) return;
+    await this.pruneCache();
     let session = null;
     try { session = await idbGet('session'); } catch { return; }
-    if (!session || !session.items.length) return;
+    if (!session || !session.items.length || Date.now() - (session.savedAt || 0) > CACHE_MAX_AGE) return;
     if (await this.restoreSession({ interactive: false, session })) return;
     this.resumeBtn.textContent = `Reopen last session (${session.items.length} photo${session.items.length === 1 ? '' : 's'})`;
     this.resumeBtn.hidden = false;
   }
 
   async restoreSession({ interactive, session = null } = {}) {
-    if (!FS_ACCESS) return false;
+    if (!SESSIONS) return false;
     let s = session;
     if (!s) { try { s = await idbGet('session'); } catch { return false; } }
     if (!s || !s.items.length) return false;
@@ -462,21 +539,25 @@ export class Labeler {
       if (p !== 'granted' && interactive) { try { p = await h.requestPermission({ mode: 'read' }); } catch { /* needs a user gesture */ } }
       return p === 'granted';
     };
-    for (const d of s.dirs) if (!(await allowed(d))) return false;
     const entries = [];
     for (const it of s.items) {
       try {
-        if (it.handle) {
-          if (!(await allowed(it.handle))) continue;
-          entries.push({ file: await it.handle.getFile(), handle: it.handle });
-        } else {
-          const dir = s.dirs[it.dir];
+        const dir = it.dir !== undefined ? s.dirs[it.dir] : null;
+        // 1) the cached copy: no permission needed, works on every browser with OPFS
+        const cached = await this.readCache(it);
+        if (cached) { entries.push({ file: cached, handle: it.handle || null, dir, path: it.path || null, fromCache: true }); continue; }
+        // 2) otherwise re-read through the file handle, which may need permission
+        if (dir) {
+          if (!(await allowed(dir))) continue;
           let h = dir;
           for (const seg of it.path.slice(0, -1)) h = await h.getDirectoryHandle(seg);
           const fh = await h.getFileHandle(it.path[it.path.length - 1]);
           entries.push({ file: await fh.getFile(), handle: fh, dir, path: it.path });
+        } else if (it.handle) {
+          if (!(await allowed(it.handle))) continue;
+          entries.push({ file: await it.handle.getFile(), handle: it.handle });
         }
-      } catch (err) { console.warn('could not restore', it, err); }
+      } catch (err) { console.warn('could not restore', it.name, err); }
     }
     if (!entries.length) return false;
     this.resumeBtn.hidden = true;

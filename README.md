@@ -31,9 +31,11 @@ Photos opened individually, or on other browsers, are downloaded instead. The **
 Downloads** dropdown lets you force downloads. Nothing is ever overwritten: a second save of the
 same photo becomes `name_labeled_2.jpg`.
 
-**Picking up where you left off.** In Chrome and Edge the app remembers which photos and folders
-were open. After a reload, or if Chrome discards the tab to save memory, it reopens them at the
-same photo, asking once for permission if the browser needs it.
+**Picking up where you left off.** When you open photos, the app keeps a private copy of each
+original inside the browser's storage. After a reload, or if the browser discards the tab to save
+memory, it reopens the same photos at the same place with no prompt. Copies are discarded after two
+weeks. On Chrome and Edge the folder link is remembered too, so saving into the folder keeps working
+after a restore (the browser may ask once before the first save).
 
 Labels are remembered per photo in your browser, so reopening the same photo later
 restores them. Undo, redo, text size, square size and colour are all in the toolbar.
@@ -81,7 +83,8 @@ you can chain click, type, click, type without pressing Enter.
 ## Browser support
 
 Chrome and Edge get everything. Safari and Firefox lack the File System Access API, so there the
-Open buttons use the ordinary file picker, saves are downloads, and sessions are not remembered.
+Open buttons use the ordinary file picker and saves are downloads. Session memory works wherever
+the browser's private file storage does (current Firefox and Chrome-based browsers).
 
 ## Development
 

@@ -18,7 +18,7 @@
     window.addEventListener('unhandledrejection', (e) => { document.getElementById('results').textContent = 'FAIL unhandled rejection: ' + (e.reason && e.reason.stack || e.reason) + '\n\nFAILURES: 1'; document.title = 'DONE'; });
   </script>
   <script type="module">
-    import { Labeler, drawLabels, outlineFor, COLOURS, isImageFile, isHeic, FS_ACCESS } from '../docs/app.js';
+    import { Labeler, drawLabels, outlineFor, COLOURS, isImageFile, isHeic, FS_ACCESS, CACHE_MAX_AGE } from '../docs/app.js';
 
     const out = [];
     let fails = 0;
@@ -375,7 +375,7 @@
         check(await app7.restoreSession({ interactive: false }), 'session restores without prompting when permission is still granted');
         check(app7.images.length === 3 && app7.index === 2 && app7.current.name === 'IMG_0020.png', `restored queue and position: ${app7.images.length} photos, at ${app7.index}`);
         check(app7.images[0].labels.length === 1 && app7.images[0].labels[0].text === 'C1', 'labels come back with the restored photos');
-        check(app7.images.every((i) => i.dir && i.handle), 'restored entries can save into the folder again');
+        check(app7.images.every((i) => i.dir && i.path && i.cached), 'restored entries came from the cache and still know their folder for saving');
         // the automatic path used at startup
         const app8 = new Labeler(document.createElement('div'));
         document.body.appendChild(app8.container);
@@ -386,6 +386,45 @@
         app6.container.remove(); app7.container.remove(); app8.container.remove();
         await root.removeEntry('lab-week3', { recursive: true });
       } else out.push('INFO File System Access API not available here; folder/session tests skipped');
+
+      // ---- byte cache: restore with no handles and no prompt; two-week expiry ---
+      if (navigator.storage && navigator.storage.getDirectory) {
+        const lsNames = async (d) => { const o = []; for await (const [n] of d.entries()) o.push(n); return o.sort(); };
+        const cacheDir = await (await navigator.storage.getDirectory()).getDirectoryHandle('cache', { create: true });
+        const app9 = new Labeler(document.createElement('div'), { resume: false });
+        document.body.appendChild(app9.container);
+        await app9.clearSession();
+        await app9.pruneCache(Date.now() + 2 * CACHE_MAX_AGE);          // start from an empty cache
+        check((await lsNames(cacheDir)).length === 0, 'cache emptied for the test');
+        await app9.openFiles([f1, f2]);                                  // plain Files: no handles at all
+        await app9.whenCached();
+        check(app9.images.every((i) => i.cached) && (await lsNames(cacheDir)).length === 2, `originals copied into the cache: ${(await lsNames(cacheDir)).length} files`);
+        const cacheIndex = await new Promise((res) => { const r = indexedDB.open('bbl', 1); r.onsuccess = () => { const t = r.result.transaction('kv').objectStore('kv').get('cache'); t.onsuccess = () => res(t.result); }; });
+        check(cacheIndex && Object.keys(cacheIndex).length === 2 && Object.values(cacheIndex).every((t) => Date.now() - t < 60000), 'cache index records when each copy was made');
+        await app9.load(1);
+        const app10 = new Labeler(document.createElement('div'), { resume: false });
+        document.body.appendChild(app10.container);
+        check(await app10.restoreSession({ interactive: false }), 'session restores from the byte cache with no handles and no prompt');
+        check(app10.images.length === 2 && app10.index === 1 && app10.current.name === 'IMG_0002.png', `restored 2 photos at position 1: ${app10.images.map((i) => i.name)} @ ${app10.index}`);
+        check(app10.images[0].file.size === f1.size && app10.images[0].key === app9.images[0].key, 'restored file has the same bytes and identity, so its labels match');
+        check(app10.images[0].labels.length === 6, `labels attached to the restored photo: ${app10.images[0].labels.length}`);
+        check(!!app10.current.bitmap && app10.current.width === 1200, 'restored bytes decode');
+        check(app10.images.every((i) => i.cached) && (await lsNames(cacheDir)).length === 2, 'restoring does not duplicate cache entries');
+        // startup path on a browser without the File System Access API is the same code: simulate by clearing handles
+        const app11 = new Labeler(document.createElement('div'));
+        document.body.appendChild(app11.container);
+        await tick(400);
+        check(app11.images.length === 2 && app11.index === 1 && app11.resumeBtn.hidden, `startup auto-restore from cache: ${app11.images.length} photos at ${app11.index}`);
+        // expiry: anything older than two weeks goes, newer stays
+        const removed = await app11.pruneCache(Date.now() + CACHE_MAX_AGE - 60000);
+        check(removed === 0 && (await lsNames(cacheDir)).length === 2, 'copies younger than two weeks are kept');
+        const removed2 = await app11.pruneCache(Date.now() + CACHE_MAX_AGE + 60000);
+        check(removed2 === 2 && (await lsNames(cacheDir)).length === 0, `copies older than two weeks are discarded (${removed2} removed)`);
+        const app12 = new Labeler(document.createElement('div'), { resume: false });
+        check(!(await app12.restoreSession({ interactive: false })), 'with the cache gone and no handles, nothing restores (no crash)');
+        await app12.clearSession();
+        for (const a of [app9, app10, app11, app12]) a.container.remove();
+      } else out.push('INFO OPFS not available here; cache tests skipped');
     } catch (err) {
       check(false, `exception: ${err && err.stack || err}`);
     }
