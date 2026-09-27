@@ -7,13 +7,16 @@ Usage:
     python label_images.py a.jpg b.jpg ...     # or list them
     python label_images.py PATH/TO/FOLDER      # or give a folder
 
+A label has three parts: the text, a small square on the part it refers to,
+and a line joining them.
+
 Mouse:
-    click empty spot        new label there
-    drag from empty spot    press on the part, drag to where the text should
-                            sit, release -> new label with an arrow
-    drag a label            move it (its arrow tip stays put)
-    drag an arrow tip       move the tip
-    click a label           select it (for Delete / recolour)
+    click on a part         square there, text placed beside it (drag it later)
+    drag from a part        press on the part, drag to where the text should sit
+    shift-click             text only, no square or line
+    drag a label            move the text (its square stays put)
+    drag a square           move the square
+    click a label           select it (for Delete / recolour / resize)
     double-click a label    edit its text
 Keys (when not typing a label):
     Enter / Esc      place / cancel the label you are typing
@@ -23,6 +26,7 @@ Keys (when not typing a label):
     Z                undo the last label
     Delete           delete the selected label
     + / -            bigger / smaller text (remembered for next time)
+    [ / ]            smaller / bigger square (selected label, or default for new ones)
     C                cycle preset colours (applies to the selected label, or to new labels)
     K                pick any colour (same)
     Q                quit
@@ -72,6 +76,7 @@ def outline_for(fill: str) -> str:
 @dataclass
 class Style:
     font_pct: float = 3.0        # text height as % of image width
+    marker_pct: float = 2.5      # square side as % of image width
     fill: str = COLOURS[0]
     suffix: str = "_labeled"
 
@@ -103,8 +108,9 @@ class Label:
     x: float                                  # text centre, original-image pixels
     y: float
     text: str
-    tip: tuple[float, float] | None = None    # arrow tip, or None
+    tip: tuple[float, float] | None = None    # square centre, or None for text only
     fill: str = COLOURS[0]
+    marker: float = 2.5                       # square side as % of image width
 
     @property
     def outline(self) -> str:
@@ -177,7 +183,7 @@ def get_font(px: int):
 
 
 def metrics(full_width: int, style: Style, scale: float) -> tuple[int, int, int]:
-    """(font px, stroke px, arrow line px) for an image of full_width shown at scale."""
+    """(font px, stroke px, leader line px) for an image of full_width shown at scale."""
     font_px = max(6, round(full_width * style.font_pct / 100 * scale))
     return font_px, max(1, round(font_px * 0.12)), max(2, round(font_px * 0.18))
 
@@ -199,56 +205,37 @@ def render(img: Image.Image, labels: list[Label], style: Style, scale: float = 1
             boxes_out.append(bbox)
         if lb.tip is not None:
             tx, ty = lb.tip[0] * scale, lb.tip[1] * scale
-            _draw_arrow(draw, bbox, (cx, cy), (tx, ty), line_w, lb.fill, lb.outline)
+            side = max(4, (full_width or img.width) * lb.marker / 100 * scale)
+            _draw_leader(draw, bbox, (cx, cy), (tx, ty), side, line_w, lb.fill, lb.outline)
         draw.text((cx, cy), lb.text, font=font, anchor="mm",
                   fill=lb.fill, stroke_width=stroke, stroke_fill=lb.outline)
     return out
 
 
-def _draw_arrow(draw, bbox, centre, tip, w: int, fill: str, outline: str) -> None:
+def _draw_leader(draw, bbox, centre, tip, side: float, w: int, fill: str, outline: str) -> None:
+    """Hollow square of the given side centred on tip, joined to the text box by a line."""
     cx, cy = centre
     tx, ty = tip
+    edge = max(1, round(w * 0.45))
+    half = side / 2
     dx, dy = tx - cx, ty - cy
     dist = math.hypot(dx, dy)
-    if dist < 1:
-        return
-    # start the shaft where the centre->tip ray leaves the (padded) text box
-    pad = w
-    half_w = (bbox[2] - bbox[0]) / 2 + pad
-    half_h = (bbox[3] - bbox[1]) / 2 + pad
-    t = min(half_w / abs(dx) if dx else math.inf, half_h / abs(dy) if dy else math.inf)
-    t = min(t, 1.0)
-    sx, sy = cx + dx * t, cy + dy * t
-    if math.hypot(tx - sx, ty - sy) < w * 2:
-        return  # tip is inside/adjacent to the text; no room for an arrow
-
-    ux, uy = dx / dist, dy / dist            # unit vector toward tip
-    head_len = w * 3.2
-    head_half = w * 1.6
-    bx, by = tx - ux * head_len, ty - uy * head_len   # base of the head
-    px, py = -uy, ux                                  # perpendicular
-    head = [(tx, ty), (bx + px * head_half, by + py * head_half),
-            (bx - px * head_half, by - py * head_half)]
-    edge = max(1, round(w * 0.45))
-    # outline pass then fill pass so the arrow reads on any background
-    draw.line([(sx, sy), (bx, by)], fill=outline, width=w + 2 * edge)
-    draw.polygon(head, fill=outline, outline=outline, width=edge)
-    draw.line([(sx, sy), (bx, by)], fill=fill, width=w)
-    draw.polygon(_shrink_triangle(head, edge), fill=fill)
-
-
-def _shrink_triangle(pts, amount):
-    cx = sum(p[0] for p in pts) / 3
-    cy = sum(p[1] for p in pts) / 3
-    out = []
-    for x, y in pts:
-        d = math.hypot(x - cx, y - cy)
-        if d <= amount:
-            out.append((cx, cy))
-        else:
-            k = (d - amount) / d
-            out.append((cx + (x - cx) * k, cy + (y - cy) * k))
-    return out
+    if dist >= 1:
+        # line runs from where the centre->tip ray leaves the (padded) text box ...
+        pad = w
+        half_w = (bbox[2] - bbox[0]) / 2 + pad
+        half_h = (bbox[3] - bbox[1]) / 2 + pad
+        t0 = min(half_w / abs(dx) if dx else math.inf, half_h / abs(dy) if dy else math.inf, 1.0)
+        sx, sy = cx + dx * t0, cy + dy * t0
+        # ... to where it enters the square
+        t1 = min(half / abs(dx) if dx else math.inf, half / abs(dy) if dy else math.inf, 1.0)
+        ex, ey = tx - dx * t1, ty - dy * t1
+        if math.hypot(ex - sx, ey - sy) > w:
+            draw.line([(sx, sy), (ex, ey)], fill=outline, width=w + 2 * edge)
+            draw.line([(sx, sy), (ex, ey)], fill=fill, width=w)
+    box = [tx - half, ty - half, tx + half, ty + half]
+    draw.rectangle([box[0] - edge, box[1] - edge, box[2] + edge, box[3] + edge], outline=outline, width=w + 2 * edge)
+    draw.rectangle(box, outline=fill, width=w)
 
 
 # --------------------------------------------------------------------------- #
@@ -325,7 +312,8 @@ class App:
             data = json.loads(sc.read_text("utf-8"))
             return [Label(d["x"], d["y"], d["text"],
                           tuple(d["tip"]) if d.get("tip") else None,
-                          d.get("fill", self.style.fill)) for d in data["labels"]]
+                          d.get("fill", self.style.fill),
+                          d.get("marker", self.style.marker_pct)) for d in data["labels"]]
         except (OSError, KeyError, json.JSONDecodeError, TypeError):
             return []
 
@@ -425,9 +413,9 @@ class App:
         sel = f"  selected: \"{self.labels[self.selected].text}\"" if self.selected is not None else ""
         msg = (f"{self.index + 1}/{len(self.images)}  {self.path.name}{done}    "
                f"labels: {len(self.labels)}{'*' if self.dirty else ''}{sel}    "
-               f"size {self.style.font_pct:.1f}%  colour {self.style.fill}    "
-               f"|  click/drag = new label   drag label = move   dbl-click = edit   "
-               f"S save+next   N/P next/prev   O open more   Z undo   Del delete   +/- size   C/K colour   Q quit")
+               f"text {self.style.font_pct:.2g}%  square {self.style.marker_pct:.2g}%  colour {self.style.fill}    "
+               f"|  click part = label   drag = choose text spot   shift-click = text only   dbl-click = edit   "
+               f"S save+next   N/P   O open   Z undo   Del   +/- text   [/] square   C/K colour   Q quit")
         if extra:
             msg = extra + "    |    " + msg
         self.status.config(text=msg)
@@ -450,17 +438,31 @@ class App:
     def to_display(self, ix: float, iy: float) -> tuple[int, int]:
         return round(ix * self.scale + self.offset[0]), round(iy * self.scale + self.offset[1])
 
+    def marker_disp(self, lb: Label) -> float:
+        """Square side in display pixels."""
+        assert self.full is not None
+        return max(4, self.full.width * lb.marker / 100 * self.scale)
+
     def hit_tip(self, x: int, y: int) -> int | None:
         assert self.full is not None
         _, _, line_w = metrics(self.full.width, self.style, self.scale)
-        radius = max(12, line_w * 3)
         for i in range(len(self.labels) - 1, -1, -1):        # topmost first
-            tip = self.labels[i].tip
-            if tip is not None:
-                tx, ty = self.to_display(*tip)
-                if math.hypot(x - tx, y - ty) <= radius:
+            lb = self.labels[i]
+            if lb.tip is not None:
+                tx, ty = self.to_display(*lb.tip)
+                reach = max(12, self.marker_disp(lb) / 2 + line_w)
+                if abs(x - tx) <= reach and abs(y - ty) <= reach:
                     return i
         return None
+
+    def default_text_pos(self, tip: tuple[float, float]) -> tuple[float, float]:
+        """Where a plain click puts the text: up and to the right of the square,
+        flipped if that would run off the image."""
+        assert self.full is not None
+        w, h = self.full.width, self.full.height
+        dx = -0.09 * w if tip[0] > 0.72 * w else 0.09 * w
+        dy = 0.06 * w if tip[1] < 0.12 * h else -0.06 * w
+        return min(max(tip[0] + dx, 0), w - 1), min(max(tip[1] + dy, 0), h - 1)
 
     def hit_label(self, x: int, y: int) -> int | None:
         pad = 6
@@ -497,10 +499,10 @@ class App:
         self.moved = True
         if self.mode == "new":
             if self.rubber is None:
-                self.rubber = self.canvas.create_line(*self.press, e.x, e.y, fill=self.style.fill,
-                                                      width=3, arrow="first", arrowshape=(16, 20, 7))
+                self.rubber = self.draw_leader_preview(self.press, (e.x, e.y), self.style.fill,
+                                                       self.style.marker_pct, "rubber")
             else:
-                self.canvas.coords(self.rubber, *self.press, e.x, e.y)
+                self.canvas.coords(self.rubber[0], *self.press, e.x, e.y)
         elif self.mode == "move" and self.selected is not None:
             lb = self.labels[self.selected]
             lb.x, lb.y = self.to_image(e.x - self.grab_offset[0], e.y - self.grab_offset[1])
@@ -518,17 +520,29 @@ class App:
         mode, moved = self.mode, self.moved
         self.press, self.mode, self.moved = None, None, False
         if self.rubber is not None:
-            self.canvas.delete(self.rubber)
+            self.canvas.delete("rubber")
             self.rubber = None
         if mode != "new" or self.entry is not None:
             return                      # finished a move/tip drag, or a double-click opened the editor
-        if not moved:
-            pos, tip = self.to_image(px, py), None
-            anchor_disp = (px, py)
-        else:
+        shift = bool(e.state & 0x1)
+        if moved:
             pos, tip = self.to_image(e.x, e.y), self.to_image(px, py)
-            anchor_disp = (e.x, e.y)
-        self.open_entry(pos, tip, anchor_disp)
+        elif shift:
+            pos, tip = self.to_image(px, py), None
+        else:
+            tip = self.to_image(px, py)
+            pos = self.default_text_pos(tip)
+        self.open_entry(pos, tip, self.to_display(*pos))
+
+    def draw_leader_preview(self, text_disp, tip_disp, fill: str, marker_pct: float, tag: str) -> list[int]:
+        """Canvas line + square used while dragging or typing; returns the item ids."""
+        assert self.full is not None
+        half = max(4, self.full.width * marker_pct / 100 * self.scale) / 2
+        line = self.canvas.create_line(*text_disp, *tip_disp, fill=fill, width=3, tags=tag)
+        box = self.canvas.create_rectangle(tip_disp[0] - half, tip_disp[1] - half,
+                                           tip_disp[0] + half, tip_disp[1] + half,
+                                           outline=fill, width=3, tags=tag)
+        return [line, box]
 
     def on_double(self, e) -> None:
         i = self.hit_label(e.x, e.y)
@@ -552,9 +566,7 @@ class App:
                               relief="flat", width=12, justify="center")
         self.canvas.create_window(anchor_disp, window=self.entry, anchor="center", tags="entry")
         if tip is not None and editing is None:
-            tx, ty = self.to_display(*tip)
-            self.canvas.create_line(*anchor_disp, tx, ty, fill=fill, width=3,
-                                    arrow="last", arrowshape=(16, 20, 7), tags="entry")
+            self.draw_leader_preview(anchor_disp, self.to_display(*tip), fill, self.style.marker_pct, "entry")
         if editing is not None:
             self.entry.insert(0, self.labels[editing].text)
             self.entry.select_range(0, "end")
@@ -585,7 +597,7 @@ class App:
                 self.selected = None
             self.dirty = True
         elif text:
-            self.labels.append(Label(pos[0], pos[1], text, tip, self.style.fill))
+            self.labels.append(Label(pos[0], pos[1], text, tip, self.style.fill, self.style.marker_pct))
             self.dirty = True
         self.refresh()
 
@@ -661,6 +673,16 @@ class App:
         elif ch in ("-", "_") or k in ("minus", "underscore", "kp_subtract"):
             self.style.font_pct = max(0.5, round(self.style.font_pct - 0.25, 2))
             self.style.save()
+            self.refresh()
+        elif k in ("bracketleft", "bracketright"):
+            delta = 0.25 if k == "bracketright" else -0.25
+            if self.selected is not None:
+                lb = self.labels[self.selected]
+                lb.marker = min(20.0, max(0.5, round(lb.marker + delta, 2)))
+                self.dirty = True
+            else:
+                self.style.marker_pct = min(20.0, max(0.5, round(self.style.marker_pct + delta, 2)))
+                self.style.save()
             self.refresh()
         elif k == "c":
             current = self.labels[self.selected].fill if self.selected is not None else self.style.fill

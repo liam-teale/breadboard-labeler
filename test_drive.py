@@ -142,8 +142,30 @@ def run():
         c.event_generate("<ButtonPress-1>", x=x, y=y)
         c.event_generate("<ButtonRelease-1>", x=x, y=y)
 
-    def double_click(fx, fy):
+    def label_disp(i):
+        lb = app.labels[i]
+        return app.to_display(lb.x, lb.y)
+
+    def shift_click(fx, fy):
         x, y = disp(fx, fy)
+        c.event_generate("<ButtonPress-1>", x=x, y=y, state=1)
+        c.event_generate("<ButtonRelease-1>", x=x, y=y, state=1)
+
+    def click_label(i):
+        x, y = label_disp(i)
+        c.event_generate("<ButtonPress-1>", x=x, y=y)
+        c.event_generate("<ButtonRelease-1>", x=x, y=y)
+
+    def drag_label(i, fx1, fy1):
+        x0, y0 = label_disp(i)
+        x1, y1 = disp(fx1, fy1)
+        c.event_generate("<ButtonPress-1>", x=x0, y=y0)
+        for k in range(1, 6):
+            c.event_generate("<B1-Motion>", x=x0 + (x1 - x0) * k // 5, y=y0 + (y1 - y0) * k // 5)
+        c.event_generate("<ButtonRelease-1>", x=x1, y=y1)
+
+    def double_click_label(i):
+        x, y = label_disp(i)
         c.event_generate("<ButtonPress-1>", x=x, y=y)
         c.event_generate("<ButtonRelease-1>", x=x, y=y)
         c.event_generate("<ButtonPress-1>", x=x, y=y)
@@ -184,10 +206,17 @@ def run():
     at(nxt(), lambda: click(0.36, 0.38))
     at(nxt(), lambda: shot(root, "02_entry_open"))
     at(nxt(), lambda: type_and_enter("R1 10k"))
-    at(nxt(), lambda: check(len(app.labels) == 1 and app.labels[0].tip is None, "plain click label added"))
-    at(t[0], lambda: check(near(app.labels[0].x, 0.36 * 4000) and near(app.labels[0].y, 0.38 * 3000),
-                           f"label at click position in image px: ({app.labels[0].x:.0f},{app.labels[0].y:.0f})"))
-    # arrow: press on the LED (0.62,0.435), release where text sits (0.80,0.30)
+    at(nxt(), lambda: check(len(app.labels) == 1 and app.labels[0].tip is not None, "plain click makes a label with a square"))
+    at(t[0], lambda: check(near(app.labels[0].tip[0], 0.36 * 4000) and near(app.labels[0].tip[1], 0.38 * 3000),
+                           f"square sits at the click position: {tuple(round(v) for v in app.labels[0].tip)}"))
+    at(t[0], lambda: check(near(app.labels[0].x, 0.45 * 4000) and near(app.labels[0].y, 0.38 * 3000 - 0.06 * 4000),
+                           f"text is offset up-right of the square: ({app.labels[0].x:.0f},{app.labels[0].y:.0f})"))
+    at(t[0], lambda: check(app.labels[0].marker == 2.5, "new label takes the default square size"))
+    at(nxt(), lambda: shift_click(0.85, 0.80))
+    at(nxt(), lambda: type_and_enter("text only"))
+    at(nxt(), lambda: check(app.labels[-1].tip is None and near(app.labels[-1].x, 0.85 * 4000), "shift-click makes a text-only label"))
+    at(nxt(), lambda: key("z"))
+    # leader: press on the LED (0.62,0.435), release where text sits (0.80,0.30)
     at(nxt(), lambda: drag(0.62, 0.435, 0.80, 0.30))
     at(nxt(), lambda: shot(root, "03_arrow_entry_open"))
 
@@ -197,12 +226,12 @@ def run():
         win = [i for i in items if app.canvas.type(i) == "window"][0]
         wx, wy = app.canvas.coords(win)
         ex, ey = disp(0.80, 0.30)
-        check(kinds == ["line", "window"] and abs(wx - ex) <= 1 and abs(wy - ey) <= 1,
-              f"entry box sits at the release point with a preview arrow: {kinds} {(wx, wy)} vs {(ex, ey)}")
+        check(kinds == ["line", "rectangle", "window"] and abs(wx - ex) <= 1 and abs(wy - ey) <= 1,
+              f"entry box sits at the release point with a preview line and square: {kinds} {(wx, wy)} vs {(ex, ey)}")
     at(nxt(), entry_check)
     at(nxt(), lambda: type_and_enter("LED (red)"))
-    at(nxt(), lambda: check(len(app.labels) == 2 and app.labels[1].tip is not None, "drag label has arrow tip"))
-    at(t[0], lambda: check(near(app.labels[1].tip[0], 0.62 * 4000), "arrow tip at press point"))
+    at(nxt(), lambda: check(len(app.labels) == 2 and app.labels[1].tip is not None, "drag label has its square at the press point"))
+    at(t[0], lambda: check(near(app.labels[1].tip[0], 0.62 * 4000), "square x matches the press point"))
     # typo, then undo it
     at(nxt(), lambda: click(0.50, 0.75))
     at(nxt(), lambda: type_and_enter("oops"))
@@ -232,17 +261,19 @@ def run():
     at(nxt(), lambda: shot(root, "04_five_labels"))
 
     # ---- moving, selecting, editing, recolouring, deleting --------------------
-    at(nxt(), lambda: drag(0.36, 0.38, 0.46, 0.48))          # grab "R1 10k" by its centre and move it
+    at(nxt(), lambda: drag_label(0, 0.46, 0.48))             # grab "R1 10k" by its text and move it
     at(nxt(), lambda: check(app.entry is None and len(app.labels) == 5, "dragging a label opens no entry"))
     at(t[0], lambda: check(near(app.labels[0].x, 0.46 * 4000) and near(app.labels[0].y, 0.48 * 3000),
                            f"label moved to the drop point: ({app.labels[0].x:.0f},{app.labels[0].y:.0f})"))
     at(t[0], lambda: check(app.selected == 0 and len(c.find_withtag("sel")) == 1, "moved label is selected and highlighted"))
+    at(t[0], lambda: check(near(app.labels[0].tip[0], 0.36 * 4000) and near(app.labels[0].tip[1], 0.38 * 3000),
+                           "square stays put while the text moves"))
     at(nxt(), lambda: shot(root, "05_after_move"))
-    at(nxt(), lambda: drag(0.62, 0.435, 0.62, 0.50))         # grab the LED arrow tip and move it down
+    at(nxt(), lambda: drag(0.62, 0.435, 0.62, 0.50))         # grab the LED square and move it down
     at(nxt(), lambda: check(near(app.labels[1].tip[0], 0.62 * 4000) and near(app.labels[1].tip[1], 0.50 * 3000),
-                            f"arrow tip dragged: {tuple(round(v) for v in app.labels[1].tip)}"))
+                            f"square dragged: {tuple(round(v) for v in app.labels[1].tip)}"))
     at(t[0], lambda: check(near(app.labels[1].x, 0.80 * 4000) and near(app.labels[1].y, 0.30 * 3000),
-                           "text stays put while the tip moves"))
+                           "text stays put while the square moves"))
     at(nxt(), lambda: click(0.46, 0.48))                     # plain click on a label selects it
     at(nxt(), lambda: check(app.entry is None and app.selected == 0, "click on a label selects without an entry"))
     at(nxt(), lambda: key("c"))
@@ -251,15 +282,22 @@ def run():
     at(nxt(), lambda: key("k"))
     at(nxt(), lambda: check(app.labels[0].fill == "#FF00FF" and app.labels[0].outline == "#FFFFFF",
                             f"K picks a custom colour with auto outline: {app.labels[0].fill}/{app.labels[0].outline}"))
+    at(nxt(), lambda: key("bracketright"))
+    at(nxt(), lambda: check(app.labels[0].marker == 2.75 and app.style.marker_pct == 2.5,
+                            "] with a selection grows only that label's square"))
     at(nxt(), lambda: key("Escape"))
     at(nxt(), lambda: check(app.selected is None and root.winfo_exists(), "Esc clears the selection"))
-    at(nxt(), lambda: click(0.52, 0.605))                    # select "555 timer" ...
+    at(nxt(), lambda: key("bracketleft"))
+    at(nxt(), lambda: check(app.style.marker_pct == 2.25 and json.loads(li.CONFIG_PATH.read_text())["marker_pct"] == 2.25,
+                            "[ with nothing selected shrinks the default square and persists it"))
+    at(nxt(), lambda: key("bracketright"))
+    at(nxt(), lambda: click_label(2))                        # select "555 timer" ...
     at(nxt(), lambda: key("Delete"))                          # ... and delete it
     at(nxt(), lambda: check([l.text for l in app.labels] == ["R1 10k", "LED (red)", "VCC", "GND wires"],
                             f"Delete removes the selected label: {[l.text for l in app.labels]}"))
     at(nxt(), lambda: click(0.52, 0.605))                    # put it back
     at(nxt(), lambda: type_and_enter("555 timer"))
-    at(nxt(), lambda: double_click(0.20, 0.30))              # edit "VCC"
+    at(nxt(), lambda: double_click_label(2))                 # edit "VCC"
     at(nxt(), lambda: check(app.entry is not None and app.entry.get() == "VCC" and app.editing == 2,
                             "double-click opens the label's text for editing"))
     at(nxt(), lambda: type_and_enter("VCC 5V", replace=True))
@@ -284,6 +322,10 @@ def run():
     at(nxt(), lambda: check(app.labels[-1].fill == "#000000" and app.labels[0].fill == "#FF00FF",
                             "new label takes the current colour; old labels keep theirs"))
     at(nxt(), lambda: shot(root, "06_mixed_colours"))
+    at(nxt(), lambda: click_label(0))
+    at(nxt(), lambda: key("bracketright")); at(nxt(50), lambda: key("bracketright")); at(nxt(50), lambda: key("bracketright"))
+    at(nxt(), lambda: check(app.labels[0].marker == 3.5, f"square resized to {app.labels[0].marker}"))
+    at(nxt(), lambda: key("Escape"))
     at(nxt(), lambda: key("c")); at(nxt(50), lambda: key("c")); at(nxt(50), lambda: key("c")); at(nxt(50), lambda: key("c"))
     at(nxt(), lambda: check(app.style.fill == li.COLOURS[0], "colour cycle wraps to yellow"))
     # Q with unsaved work warns first
@@ -295,7 +337,7 @@ def run():
     at(t[0], lambda: check(li.output_path(f1, style).exists(), "output jpg written"))
     at(t[0], lambda: check(li.sidecar_path(f1).exists(), "sidecar json written"))
     at(t[0], lambda: check(len(app.labels) == 0 and not app.dirty and app.selected is None, "next image starts clean"))
-    # image 2: one plain label, one arrow, then go back and check preload
+    # image 2: one clicked label, one dragged, then go back and check preload
     at(nxt(), lambda: click(0.36, 0.40))
     at(nxt(), lambda: type_and_enter("220 Ω"))
     at(nxt(), lambda: drag(0.515, 0.60, 0.30, 0.80))
@@ -308,8 +350,8 @@ def run():
                                f"P goes back and reloads saved labels: {[l.text for l in app.labels]}"))
     at(t[0], lambda: check("[already labeled]" in app.status.cget("text"), "status marks already-labeled image"))
     at(nxt(), lambda: key("p"))
-    at(nxt(200), lambda: check(len(app.labels) == 6 and app.labels[0].fill == "#FF00FF",
-                               f"image 1 labels reload with their colours: {len(app.labels)}"))
+    at(nxt(200), lambda: check(len(app.labels) == 6 and app.labels[0].fill == "#FF00FF" and app.labels[0].marker == 3.5,
+                               f"image 1 labels reload with their colours and square sizes: {len(app.labels)}"))
     at(nxt(), lambda: key("n")); at(nxt(200), lambda: key("n"))
     at(nxt(200), lambda: check(app.index == 2, "N N returns to image 3"))
     at(nxt(), lambda: key("n"))
@@ -350,6 +392,9 @@ def run():
           "sidecar has the six labels in order")
     check([l["fill"] for l in sc["labels"]] == ["#FF00FF", "#FFEB3B", "#FFEB3B", "#FFEB3B", "#FFEB3B", "#000000"],
           f"sidecar keeps per-label colours: {[l['fill'] for l in sc['labels']]}")
+    check([l["marker"] for l in sc["labels"]] == [3.5, 2.5, 2.5, 2.5, 2.5, 2.5],
+          f"sidecar keeps per-label square sizes: {[l['marker'] for l in sc['labels']]}")
+    check(all(l["tip"] is not None for l in sc["labels"]), "every clicked label has a square")
     for i, l in enumerate(sc["labels"]):
         box = (int(l["x"] - 700), int(l["y"] - 300), int(l["x"] + 700), int(l["y"] + 300))
         im.crop(box).save(SHOTS / f"out1_crop_{i}_{l['text'].replace(' ', '_').replace('(', '').replace(')', '')}.png")

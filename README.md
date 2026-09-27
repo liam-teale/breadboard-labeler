@@ -3,13 +3,17 @@
 Click-and-type labels burned into photos. Built for "many photos a week, each
 label in a different spot, same style every time".
 
+A label has three parts: the text, a small hollow square on the part it refers to, and a
+straight line joining them.
+
 ## Run it
 
 1. Double-click `label.bat`. A file picker opens: Ctrl-click or Shift-click the photos you want.
 2. For each photo:
-   - **Click** an empty spot, type the label, **Enter**.
-   - **Drag** for an arrow: press on the part, drag to where the text should sit, release, type, **Enter**.
-   - **Drag a label** to move it. **Drag an arrow tip** to re-aim it.
+   - **Click the part.** The square lands there and a text box opens beside it. Type, **Enter**.
+   - **Or drag:** press on the part, drag to where the text should sit, release, type, **Enter**.
+   - **Drag the text** to move it. The square stays on the part. **Drag the square** to move that.
+   - **Shift-click** for a text-only label with no square or line.
    - **Double-click a label** to change its text.
    - **S** saves `name_labeled.jpg` next to the original and opens the next photo.
 3. After the last photo it closes itself.
@@ -29,13 +33,15 @@ Other ways to start it: drop photos (or a folder) onto `label.bat`, or from a te
 | Z | undo the last label |
 | Delete | delete the selected label |
 | + / - | bigger / smaller text (remembered for next week) |
+| [ / ] | smaller / bigger square |
 | C | cycle preset colours: yellow, white, black, red, cyan, green |
 | K | pick any colour from a colour dialog |
 | Q | quit (warns once if you have unsaved labels) |
 
-**Colours:** with a label selected (click it), C or K recolour that one label. With nothing selected,
-they set the colour for every new label from then on, and that choice is remembered between runs.
-The outline is picked automatically: black under light colours, white under dark ones.
+**Colours and square size:** with a label selected (click its text), C, K, [ and ] change that one
+label. With nothing selected, they set the defaults for every new label from then on, and those
+defaults are remembered between runs. The outline colour is picked automatically: black under light
+colours, white under dark ones.
 
 Clicking somewhere new while still typing a label places that label and starts the next one, so
 you can chain click, type, click, type without pressing Enter.
@@ -43,7 +49,7 @@ you can chain click, type, click, type without pressing Enter.
 ## What it writes
 
 - `photo_labeled.jpg` (or `.png`) next to each original. Originals are never touched.
-- `.labeler/photo.json` in the same folder: the labels, positions and colours. Reopening a photo
+- `.labeler/photo.json` in the same folder: the labels, positions, colours and square sizes. Reopening a photo
   reloads them so you can move one, fix a typo, and press S again.
 - `~/.breadboard_labeler.json`: your text size and colour, so they stick between runs.
 
