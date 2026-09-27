@@ -41,14 +41,16 @@ restores them. Undo, redo, text size, square size and colour are all in the tool
 | Delete | delete the selected label |
 | + / - | bigger / smaller text |
 | [ / ] | smaller / bigger square |
-| C | cycle preset colours: yellow, white, black, red, cyan, green |
+| C | cycle preset colours: yellow, orange, white, black, red, cyan, green, then your own |
 | K | pick any colour |
+| + (toolbar) | save the current colour as a preset; right-click a custom preset to remove it |
 | Shift-click | text-only label, no square (the "Text only" button does the same on touch screens) |
 | ? | show this list in the app |
 
 **Colours and square size:** with a label selected (click its text), C, K, [ and ] change that one
-label. With nothing selected, they set the defaults for every new label from then on, and those
-defaults are remembered. The text colour is picked automatically: black on light colours, white
+label. While you are typing a new label, colour changes apply to that label immediately. With
+nothing selected, they set the defaults for every new label from then on, and those defaults are
+remembered, as are your custom presets. The text colour is picked automatically: black on light colours, white
 on dark ones.
 
 Clicking somewhere new while still typing a label places that label and starts the next one, so
@@ -67,7 +69,6 @@ you can chain click, type, click, type without pressing Enter.
 ## Development
 
 Plain HTML, CSS and JavaScript in `docs/`, served by GitHub Pages from `main`. No build step.
-`web-test/harness.html` is the self-test: serve the repo root (`python -m http.server 8765`) and open
-it in a browser, or drive it headless. `web-test/sw-check.mjs` proves the offline story: run it with
-`online` while the server is up, stop the server, then run it with `offline` (it blocks the CDN too). An earlier Python desktop version lives in the git history
+`web-test/harness.html` is the self-test: serve the repo root (`python -m http.server`) and open
+it in a browser, or drive it headless. An earlier Python desktop version lives in the git history
 before the "Retire the desktop version" commit.

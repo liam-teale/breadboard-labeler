@@ -166,10 +166,42 @@
       type('VCC 5V');
       check(texts()[2] === 'VCC 5V' && texts().length === 5, `edit replaces text: ${texts()}`);
       key('Escape');                                   // editing keeps the label selected
-      key('c'); key('c'); click(0.75, 0.75); type('black label');
-      check(app.current.labels[5].fill === '#000000' && app.current.labels[0].fill === '#FF00FF', 'new label takes current colour, old keep theirs');
+      key('c'); key('c'); key('c'); click(0.75, 0.75); type('black label');
+      check(app.current.labels[5].fill === '#000000' && app.current.labels[0].fill === '#FF00FF', `new label takes current colour, old keep theirs (${app.current.labels[5].fill})`);
       key('c'); key('c'); key('c'); key('c');
-      check(app.style.fill === COLOURS[0], 'colour cycle wraps');
+      check(app.style.fill === COLOURS[0], `colour cycle wraps: ${app.style.fill}`);
+      check(COLOURS[1] === '#FF9800' && !!app.swatchesEl.querySelector('[data-colour="#FF9800"]'), 'orange preset exists');
+
+      // ---- custom presets ----------------------------------------------------
+      check(app.addPreset('#8E24AA') && app.custom.includes('#8E24AA'), 'custom preset added');
+      check(!!app.swatchesEl.querySelector('.bbl-swatch-custom[data-colour="#8E24AA"]'), 'custom preset rendered as a swatch');
+      check(JSON.parse(localStorage.getItem('bbl.customColours')).includes('#8E24AA'), 'custom preset persisted');
+      check(!app.addPreset('#8e24aa'), 'duplicate preset (any case) is refused');
+      app.style.fill = COLOURS[COLOURS.length - 1]; key('c');
+      check(app.style.fill === '#8E24AA', 'C cycles into the custom preset after the built-ins');
+      key('c'); check(app.style.fill === COLOURS[0], 'and wraps back to yellow');
+      app.applyColour('#3F51B5'); app.action('addPreset');
+      check(app.custom.length === 2 && app.custom[1] === '#3F51B5', '+ button saves the current colour');
+      app.swatchesEl.querySelector('[data-colour="#3F51B5"]').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+      check(app.custom.length === 1 && !app.swatchesEl.querySelector('[data-colour="#3F51B5"]'), 'right-click removes a custom preset');
+      app.applyColour(COLOURS[0]);
+
+      // ---- colour changes while typing apply immediately ---------------------
+      click(0.15, 0.60);
+      app.swatchesEl.querySelector('[data-colour="#FF9800"]').click();
+      check(!!app.entry && app.entry.fill === '#FF9800' && app.entryEl.style.backgroundColor === 'rgb(255, 152, 0)',
+        'clicking a swatch while typing recolours the pending label at once');
+      check(app.style.fill === '#FF9800', 'and it becomes the default for later labels');
+      type('orange one');
+      check(app.current.labels.at(-1).fill === '#FF9800' && app.current.labels.at(-1).text === 'orange one', 'the placed label keeps that colour');
+      c.dispatchEvent(new MouseEvent('dblclick', { clientX: rect().left + labelDisp(0)[0], clientY: rect().top + labelDisp(0)[1], bubbles: true }));
+      app.swatchesEl.querySelector('[data-colour="#00E5FF"]').click();
+      check(!!app.entry && app.current.labels[0].fill === '#00E5FF' && app.entry.fill === '#00E5FF', 'while editing, a swatch recolours that label immediately');
+      app.entryEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); key('Escape');
+      check(app.current.labels[0].fill === '#00E5FF', 'the recolour survives cancelling the edit');
+      key('z'); check(app.current.labels[0].fill === '#FF00FF', 'and Z undoes it');
+      key('z'); check(app.current.labels.length === 6, 'Z removes the orange test label');
+      app.applyColour(COLOURS[0]);
 
       // ---- full-res render ----------------------------------------------------
       const full = app.renderFull();

@@ -4,8 +4,9 @@
 // never leave the device, and the original files are never modified: saving
 // always downloads a new *_labeled copy.
 
-export const COLOURS = ['#FFEB3B', '#FFFFFF', '#000000', '#FF3B30', '#00E5FF', '#76FF03'];
+export const COLOURS = ['#FFEB3B', '#FF9800', '#FFFFFF', '#000000', '#FF3B30', '#00E5FF', '#76FF03'];
 const STYLE_KEY = 'bbl.style';
+const PRESETS_KEY = 'bbl.customColours';
 // HEIC/HEIF (iPhone photos) are decoded with heic-to (libheif 1.22, handles the
 // 10-bit HDR files newer iPhones produce), fetched only the first time such a
 // file is opened. The "csp" build avoids eval so it also runs under a strict CSP.
@@ -124,6 +125,7 @@ const HELP = [
   ['+ / -', 'text size'],
   ['[ / ]', 'square size'],
   ['C / K', 'cycle colours / colour picker'],
+  ['+ button', 'save the current colour as a preset (right-click a custom one to remove)'],
   ['Shift-click', 'text only, no square'],
 ];
 
@@ -135,6 +137,7 @@ export class Labeler {
     this.style = Object.assign({ fontPct: 3, markerPct: 2.5, fill: COLOURS[0], format: 'jpg' }, loadJSON(STYLE_KEY, {}));
     if (!['jpg', 'png'].includes(this.style.format)) this.style.format = 'jpg';
     this.saved = loadJSON(LABELS_KEY, {});
+    this.custom = (loadJSON(PRESETS_KEY, []) || []).filter((c) => /^#[0-9A-F]{6}$/i.test(c)).map((c) => c.toUpperCase());
     this.selected = null;
     this.textOnly = false;
     this.press = null; this.mode = null; this.moved = false; this.grab = [0, 0];
@@ -172,6 +175,7 @@ export class Labeler {
         <span class="bbl-group" title="Square size ([ / ])">&#9632; <button data-act="markerDown">&minus;</button><button data-act="markerUp">+</button></span>
         <span class="bbl-swatches"></span>
         <input type="color" class="bbl-colour" title="Any colour (K)">
+        <button data-act="addPreset" class="bbl-add" title="Save the current colour as a preset (right-click a custom preset to remove it)">+</button>
         <button data-act="textOnly" class="bbl-toggle" title="Next label: text only, no square (or shift-click)">Text only</button>
         <button data-act="help" title="Keys">?</button>
       </div>
@@ -197,12 +201,50 @@ export class Labeler {
     this.textOnlyBtn = c.querySelector('[data-act=textOnly]');
     this.formatSelect = c.querySelector('.bbl-format');
     this.formatSelect.value = this.style.format;
-    const sw = c.querySelector('.bbl-swatches');
-    for (const col of COLOURS) {
+    this.swatchesEl = c.querySelector('.bbl-swatches');
+    this.renderSwatches();
+  }
+
+  /** Built-in presets followed by the user's own. */
+  presets() { return [...COLOURS, ...this.custom]; }
+
+  renderSwatches() {
+    this.swatchesEl.innerHTML = '';
+    for (const col of this.presets()) {
       const b = document.createElement('button');
-      b.className = 'bbl-swatch'; b.style.background = col; b.dataset.colour = col; b.title = col;
-      sw.appendChild(b);
+      const own = !COLOURS.includes(col);
+      b.className = 'bbl-swatch' + (own ? ' bbl-swatch-custom' : '');
+      b.style.background = col; b.dataset.colour = col;
+      b.title = own ? `${col} (your preset; right-click to remove)` : col;
+      this.swatchesEl.appendChild(b);
     }
+  }
+
+  addPreset(col) {
+    col = (col || this.currentColour()).toUpperCase();
+    if (this.presets().includes(col)) { this.flash(`${col} is already a preset.`); return false; }
+    this.custom.push(col);
+    saveJSON(PRESETS_KEY, this.custom);
+    this.renderSwatches();
+    this.flash(`Saved ${col} as a preset.`);
+    return true;
+  }
+
+  removePreset(col) {
+    const i = this.custom.indexOf(col.toUpperCase());
+    if (i < 0) return false;
+    this.custom.splice(i, 1);
+    saveJSON(PRESETS_KEY, this.custom);
+    this.renderSwatches();
+    this.flash(`Removed preset ${col.toUpperCase()}.`);
+    return true;
+  }
+
+  /** The colour that C/K/swatches would change: the selected label's, the label being typed, or the default. */
+  currentColour() {
+    if (this.selected !== null && this.current) return this.current.labels[this.selected].fill;
+    if (this.entry) return this.entry.fill;
+    return this.style.fill;
   }
 
   bind() {
@@ -213,6 +255,10 @@ export class Labeler {
       const b = e.target.closest('button'); if (!b) return;
       if (b.dataset.colour) { this.applyColour(b.dataset.colour); return; }
       const act = b.dataset.act; if (act) this.action(act);
+    });
+    this.swatchesEl.addEventListener('contextmenu', (e) => {
+      const b = e.target.closest('.bbl-swatch-custom'); if (!b) return;
+      e.preventDefault(); this.removePreset(b.dataset.colour);
     });
     this.colourInput.addEventListener('input', () => this.applyColour(this.colourInput.value.toUpperCase()));
     this.formatSelect.addEventListener('change', () => this.setFormat(this.formatSelect.value));
@@ -245,6 +291,7 @@ export class Labeler {
       markerUp: () => this.adjustMarker(0.25), markerDown: () => this.adjustMarker(-0.25),
       textOnly: () => { this.textOnly = !this.textOnly; this.textOnlyBtn.classList.toggle('bbl-on', this.textOnly); },
       help: () => { this.helpEl.hidden = !this.helpEl.hidden; },
+      addPreset: () => this.addPreset(),
     };
     if (map[act]) map[act]();
   }
@@ -591,7 +638,7 @@ export class Labeler {
   growEntry() { this.entryEl.style.width = `${Math.max(6, this.entryEl.value.length + 2)}ch`; }
   commitEntry() {
     if (!this.entry) return;
-    const { pos, tip, editing } = this.entry;
+    const { pos, tip, editing, fill } = this.entry;
     const text = this.entryEl.value.trim();
     this.cancelEntry();
     const im = this.current;
@@ -602,7 +649,7 @@ export class Labeler {
       this.changed();
     } else if (text) {
       this.snapshot();
-      im.labels.push({ x: pos[0], y: pos[1], text, tip, fill: this.style.fill, marker: this.style.markerPct });
+      im.labels.push({ x: pos[0], y: pos[1], text, tip, fill, marker: this.style.markerPct });
       this.changed();
     }
   }
@@ -615,13 +662,21 @@ export class Labeler {
 
   // ---- edits ----------------------------------------------------------- //
   applyColour(fill) {
+    fill = fill.toUpperCase();
     if (this.selected !== null && this.current) { this.snapshot(); this.current.labels[this.selected].fill = fill; this.changed(); }
     else { this.style.fill = fill; saveJSON(STYLE_KEY, this.style); this.refresh(); }
+    if (this.entry) {
+      // a label is being typed: show the new colour right away, not only after Enter
+      this.entry.fill = fill;
+      this.entryEl.style.background = fill; this.entryEl.style.color = outlineFor(fill);
+      this.entryEl.focus();
+      this.refresh();
+    }
   }
   cycleColour() {
-    const cur = this.selected !== null && this.current ? this.current.labels[this.selected].fill : this.style.fill;
-    const i = COLOURS.indexOf(cur);
-    this.applyColour(COLOURS[(i + 1) % COLOURS.length]);
+    const list = this.presets();
+    const i = list.indexOf(this.currentColour());
+    this.applyColour(list[(i + 1) % list.length]);
   }
   adjustFont(d) {
     this.style.fontPct = Math.min(15, Math.max(0.5, Math.round((this.style.fontPct + d) * 100) / 100));

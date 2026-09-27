@@ -37,6 +37,8 @@ body {
 .bbl-swatches { display: inline-flex; gap: 4px; margin-left: 4px; }
 .bbl-toolbar .bbl-swatch { width: 24px; height: 24px; min-width: 0; padding: 0; border-radius: 50%; border: 2px solid #777; }
 .bbl-toolbar .bbl-swatch:hover { border-color: #fff; }
+.bbl-toolbar .bbl-swatch-custom { border-style: dashed; }
+.bbl-toolbar .bbl-add { min-width: 28px; padding: 4px 8px; font-weight: 700; }
 .bbl-format {
   background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
   border-radius: 6px; padding: 6px 8px; font: inherit; cursor: pointer;
