@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>labeler harness</title>
+  <link rel="stylesheet" href="../docs/style.css">
+  <style>
+    html, body { overflow: auto; }
+    #app { height: 900px; width: 1400px; }
+    #results { white-space: pre; font: 12px monospace; background: #fff; color: #000; padding: 8px; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <pre id="results">running</pre>
+  <script>
+    window.addEventListener('error', (e) => { document.getElementById('results').textContent = 'FAIL script error: ' + e.message + ' @' + e.filename + ':' + e.lineno + '\n\nFAILURES: 1'; document.title = 'DONE'; });
+    window.addEventListener('unhandledrejection', (e) => { document.getElementById('results').textContent = 'FAIL unhandled rejection: ' + (e.reason && e.reason.stack || e.reason) + '\n\nFAILURES: 1'; document.title = 'DONE'; });
+  </script>
+  <script type="module">
+    import { Labeler, drawLabels, outlineFor, COLOURS } from '../docs/app.js';
+
+    const out = [];
+    let fails = 0;
+    const check = (cond, msg) => { out.push((cond ? 'PASS ' : 'FAIL ') + msg); if (!cond) fails++; };
+    const near = (a, b, tol = 3) => Math.abs(a - b) < tol;
+    const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms));
+
+    function makeBoard(w, h) {
+      const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+      const d = cv.getContext('2d');
+      d.fillStyle = '#d7d2c8'; d.fillRect(0, 0, w, h);
+      d.fillStyle = '#f5f3ee'; d.fillRect(w * 0.05, h * 0.15, w * 0.9, h * 0.7);
+      const step = w / 60;
+      d.fillStyle = '#3c3c3c';
+      for (let gx = 6; gx < 55; gx++) for (let gy = 12; gy < 46; gy++) {
+        if (gy === 27 || gy === 28) continue;
+        d.fillRect(w * 0.05 + gx * step, h * 0.15 + gy * step, step * 0.4, step * 0.4);
+      }
+      d.fillStyle = '#c81e1e'; d.fillRect(w * 0.06, h * 0.175, w * 0.88, step / 3);
+      d.fillStyle = '#1e3cc8'; d.fillRect(w * 0.06, h * 0.215, w * 0.88, step / 3);
+      d.fillStyle = '#c8aa6e'; d.fillRect(w * 0.30, h * 0.45, w * 0.12, h * 0.03);
+      d.fillStyle = '#dc2828'; d.beginPath(); d.ellipse(w * 0.62, h * 0.435, w * 0.02, h * 0.035, 0, 0, 7); d.fill();
+      d.fillStyle = '#1e1e1e'; d.fillRect(w * 0.45, h * 0.55, w * 0.13, h * 0.11);
+      return cv;
+    }
+    async function toFile(cv, name, type) {
+      const blob = await new Promise((r) => cv.toBlob(r, type, 0.92));
+      return new File([blob], name, { type, lastModified: 1700000000000 });
+    }
+
+    try {
+      localStorage.clear();
+      const app = new Labeler(document.getElementById('app'));
+      window.app = app;
+      const f1 = await toFile(makeBoard(4000, 3000), 'IMG_0001.jpg', 'image/jpeg');
+      const f2 = await toFile(makeBoard(1200, 800), 'IMG_0002.png', 'image/png');
+      const f3 = await toFile(makeBoard(800, 600), 'IMG_0001_labeled.jpg', 'image/jpeg');
+      await app.openFiles([f1, f2, f3]);
+      await tick();
+      check(app.images.length === 2 && app.images[0].name === 'IMG_0001.jpg', `opens images, skips *_labeled: ${app.images.map((i) => i.name)}`);
+      check(app.current.width === 4000 && app.scale < 1, `large image scaled to fit: ${app.scale.toFixed(3)}`);
+
+      const c = app.canvas;
+      const W = () => app.current.width, H = () => app.current.height;
+      const disp = (fx, fy) => app.toDisplay(W() * fx, H() * fy);
+      const rect = () => c.getBoundingClientRect();
+      function ptr(type, [x, y], extra = {}) {
+        const r = rect();
+        c.dispatchEvent(new PointerEvent(type, { clientX: r.left + x, clientY: r.top + y, bubbles: true, pointerId: 1,
+          isPrimary: true, button: 0, buttons: type === 'pointerup' ? 0 : 1, pointerType: 'mouse', ...extra }));
+      }
+      const click = (fx, fy, extra) => { ptr('pointerdown', disp(fx, fy), extra); ptr('pointerup', disp(fx, fy), extra); };
+      function drag(p0, p1) {
+        ptr('pointerdown', p0);
+        for (let i = 1; i <= 5; i++) ptr('pointermove', [p0[0] + (p1[0] - p0[0]) * i / 5, p0[1] + (p1[1] - p0[1]) * i / 5]);
+        ptr('pointerup', p1);
+      }
+      const dragF = (fx0, fy0, fx1, fy1) => drag(disp(fx0, fy0), disp(fx1, fy1));
+      const labelDisp = (i) => app.toDisplay(app.current.labels[i].x, app.current.labels[i].y);
+      const clickLabel = (i) => { const p = labelDisp(i); ptr('pointerdown', p); ptr('pointerup', p); };
+      const dragLabel = (i, fx1, fy1) => drag(labelDisp(i), disp(fx1, fy1));
+      const key = (k, extra = {}) => document.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, ...extra }));
+      const type = (text) => {
+        check(!!app.entry, `entry opened for '${text}'`);
+        app.entryEl.value = text;
+        app.entryEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      };
+      const texts = () => app.current.labels.map((l) => l.text);
+
+      // ---- image 1 --------------------------------------------------------
+      click(0.36, 0.38);
+      check(!!app.entry && app.entry.tip, 'click opens an entry with a square');
+      type('R1 10k');
+      let lb = app.current.labels[0];
+      check(app.current.labels.length === 1 && near(lb.tip[0], 0.36 * 4000) && near(lb.tip[1], 0.38 * 3000), `square at the click point: ${lb.tip.map(Math.round)}`);
+      check(near(lb.x, 0.45 * 4000) && near(lb.y, 0.38 * 3000 - 0.06 * 4000), `text offset up-right: ${[lb.x, lb.y].map(Math.round)}`);
+      check(lb.marker === 2.5 && lb.fill === COLOURS[0], 'new label takes default size and colour');
+
+      dragF(0.62, 0.435, 0.80, 0.30);
+      check(!!app.entry && near(app.entry.disp[0], disp(0.80, 0.30)[0]), 'drag opens the entry at the release point');
+      type('LED (red)');
+      lb = app.current.labels[1];
+      check(near(lb.tip[0], 0.62 * 4000) && near(lb.x, 0.80 * 4000), 'dragged label: square at press, text at release');
+
+      click(0.50, 0.75); type('oops');
+      key('z'); check(texts().length === 2, 'Z undoes the add');
+      key('y'); check(texts().length === 3 && texts()[2] === 'oops', 'Y redoes it');
+      key('z');
+      key('y'); key('y'); check(texts().length === 3 && app.statusEl.textContent.includes('Nothing to redo'), 'extra Y just flashes');
+      key('z');
+
+      click(0.50, 0.75); type(''); check(texts().length === 2, 'empty text adds nothing');
+      click(0.50, 0.75); app.entryEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      check(!app.entry && texts().length === 2, 'Esc cancels');
+
+      click(0.52, 0.605); app.entryEl.value = '555 timer';
+      click(0.20, 0.30);
+      check(texts().length === 3 && texts()[2] === '555 timer' && !!app.entry, 'click while typing commits then opens a new entry');
+      type('VCC');
+      click(0.85, 0.80, { shiftKey: true }); type('shift text');
+      check(app.current.labels[4].tip === null, 'shift-click makes a text-only label');
+      key('z');
+      app.action('textOnly'); click(0.85, 0.80); type('toggle text');
+      check(app.current.labels[4].tip === null && app.textOnly, 'Text only toggle makes a text-only label');
+      app.action('textOnly'); key('z');
+      click(0.40, 0.72);
+      key('s'); check(app.index === 0 && texts().length === 4 && !!app.entry, 'S while typing does not save');
+      type('GND wire');
+      check(texts().length === 5, `five labels: ${texts()}`);
+
+      // ---- move / select / edit / colour / size ------------------------------
+      dragLabel(0, 0.46, 0.48);
+      lb = app.current.labels[0];
+      check(!app.entry && near(lb.x, 0.46 * 4000) && near(lb.y, 0.48 * 3000), `dragging text moves it: ${[lb.x, lb.y].map(Math.round)}`);
+      check(near(lb.tip[0], 0.36 * 4000), 'square stays put while text moves');
+      check(app.selected === 0, 'moved label is selected');
+      key('z'); check(near(app.current.labels[0].x, 0.45 * 4000), 'Z undoes the move');
+      key('y'); check(near(app.current.labels[0].x, 0.46 * 4000), 'Y redoes the move');
+      clickLabel(0); key('z'); check(near(app.current.labels[0].x, 0.45 * 4000), 'plain click leaves no undo step');
+      key('y');
+      dragF(0.62, 0.435, 0.62, 0.50);
+      lb = app.current.labels[1];
+      check(near(lb.tip[1], 0.50 * 3000) && near(lb.x, 0.80 * 4000), 'dragging the square moves only the square');
+      clickLabel(0); check(app.selected === 0 && !app.entry, 'click on a label selects it');
+      key('c'); check(app.current.labels[0].fill === COLOURS[1] && app.style.fill === COLOURS[0], 'C with a selection recolours only that label');
+      clickLabel(0); app.applyColour('#FF00FF');
+      check(app.current.labels[0].fill === '#FF00FF' && outlineFor('#FF00FF') === '#FFFFFF', 'custom colour with auto outline');
+      key('z'); check(app.current.labels[0].fill === COLOURS[1], 'Z undoes a recolour');
+      key('y'); check(app.current.labels[0].fill === '#FF00FF', 'Y redoes it');
+      clickLabel(0); key(']'); check(app.current.labels[0].marker === 2.75 && app.style.markerPct === 2.5, '] grows only the selected square');
+      key('Escape'); check(app.selected === null, 'Esc clears the selection');
+      key('['); check(app.style.markerPct === 2.25 && JSON.parse(localStorage.getItem('bbl.style')).markerPct === 2.25, '[ changes and persists the default square');
+      key(']');
+      key('+'); key('+'); key('-'); check(app.style.fontPct === 3.25, `+/- change text size: ${app.style.fontPct}`);
+      clickLabel(2); key('Delete');
+      check(texts().join() === 'R1 10k,LED (red),VCC,GND wire', `Delete removes the selected label: ${texts()}`);
+      key('z'); check(texts().length === 5 && texts()[2] === '555 timer', 'Z restores it');
+      key('y');
+      click(0.52, 0.605); type('555 timer');
+      c.dispatchEvent(new MouseEvent('dblclick', { clientX: rect().left + labelDisp(2)[0], clientY: rect().top + labelDisp(2)[1], bubbles: true }));
+      check(!!app.entry && app.entryEl.value === 'VCC' && app.entry.editing === 2, 'double-click edits the text');
+      type('VCC 5V');
+      check(texts()[2] === 'VCC 5V' && texts().length === 5, `edit replaces text: ${texts()}`);
+      key('Escape');                                   // editing keeps the label selected
+      key('c'); key('c'); click(0.75, 0.75); type('black label');
+      check(app.current.labels[5].fill === '#000000' && app.current.labels[0].fill === '#FF00FF', 'new label takes current colour, old keep theirs');
+      key('c'); key('c'); key('c'); key('c');
+      check(app.style.fill === COLOURS[0], 'colour cycle wraps');
+
+      // ---- full-res render ----------------------------------------------------
+      const full = app.renderFull();
+      check(full.width === 4000 && full.height === 3000, 'full render keeps resolution');
+      const px = (cv, x, y) => { const d = cv.getContext('2d').getImageData(Math.round(x), Math.round(y), 1, 1).data; return '#' + [...d].slice(0, 3).map((v) => v.toString(16).padStart(2, '0')).join('').toUpperCase(); };
+      lb = app.current.labels[0];
+      check(px(full, lb.tip[0], lb.tip[1]) === '#FF00FF', `square is solid fill colour: ${px(full, lb.tip[0], lb.tip[1])}`);
+      const boxes = drawLabels(document.createElement('canvas').getContext('2d'), app.current.labels, 4000, app.style, 1);
+      const b0 = boxes[0];
+      check(px(full, b0[0] + 8, (b0[1] + b0[3]) / 2) === '#FF00FF', 'text box is solid fill colour');
+      const blob = await app.saveBlob();
+      check(blob && blob.type === 'image/jpeg' && blob.size > 50000, `saveBlob makes a jpeg (${blob.size} bytes)`);
+      check(app.outputName(app.current).name === 'IMG_0001_labeled.jpg', 'output name');
+      check(app.outputName(app.images[1]).name === 'IMG_0002_labeled.png', 'png output name');
+
+      // ---- persistence and navigation ---------------------------------------
+      const stored = JSON.parse(localStorage.getItem('bbl.labels'));
+      const key1 = app.images[0].key;
+      check(stored[key1].length === 6 && stored[key1][0].fill === '#FF00FF' && stored[key1][0].marker === 2.75, 'labels persisted to localStorage with colour and size');
+      key('n'); check(app.index === 1 && app.current.labels.length === 0 && app.selected === null, 'N moves to the next image, clean');
+      check(app.current.undo.length === 0, 'undo history is per image');
+      click(0.36, 0.40); type('220 Ω');
+      key('p'); check(app.index === 0 && app.current.labels.length === 6, 'P goes back and labels are still there');
+      key('n'); check(app.current.labels[0].text === '220 Ω', 'image 2 labels kept');
+      key('n'); check(app.index === 1 && app.statusEl.textContent.includes('No more'), 'N past the end flashes');
+      // re-open the same file in a fresh instance: labels restored from storage
+      const app2 = new Labeler(document.createElement('div'));
+      document.body.appendChild(app2.container);
+      await app2.openFiles([f1]); await tick();
+      check(app2.current.labels.length === 6 && app2.current.labels[2].text === 'VCC 5V', 'reopening a photo restores its labels');
+      check(app2.style.markerPct === 2.5 && app2.style.fontPct === 3.25, 'style restored in a fresh instance');
+      app2.container.remove();
+
+      // screenshot state for a visual check
+      app.load(0); app.selected = 0; app.refresh();
+    } catch (err) {
+      check(false, `exception: ${err && err.stack || err}`);
+    }
+    out.push('', `FAILURES: ${fails}`);
+    document.getElementById('results').textContent = out.join('\n');
+    document.title = 'DONE';
+  </script>
+</body>
+</html>
