@@ -182,6 +182,8 @@
       check(px(full, b0[0] + 8, (b0[1] + b0[3]) / 2) === '#FF00FF', 'text box is solid fill colour');
       const blob = await app.saveBlob();
       check(blob && blob.type === 'image/jpeg' && blob.size > 50000, `saveBlob makes a jpeg (${blob.size} bytes)`);
+      const q95 = await new Promise((r) => app.renderFull().toBlob(r, 'image/jpeg', 0.95));
+      check(blob.size < q95.size * 0.8, `default JPEG quality is below 0.95: ${blob.size} vs ${q95.size} bytes at 0.95`);
       check(app.style.format === 'jpg' && app.outputName(app.current).name === 'IMG_0001_labeled.jpg', 'default output is JPG');
       check(app.outputName(app.images[1]).name === 'IMG_0002_labeled.jpg', 'PNG input still saves as JPG');
       app.setFormat('png');

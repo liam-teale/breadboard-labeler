@@ -22,6 +22,8 @@ export function isImageFile(file) {
 }
 const LABELS_KEY = 'bbl.labels';
 const DRAG_THRESHOLD = 6;
+// 0.85 is visually identical to 0.95 on a photo at half the file size.
+const JPEG_QUALITY = 0.85;
 
 export function outlineFor(fill) {
   const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(fill || '');
@@ -358,7 +360,7 @@ export class Labeler {
   async saveBlob(im = this.current) {
     const { mime } = this.outputName(im);
     const cv = this.renderFull(im);
-    return new Promise((resolve) => cv.toBlob(resolve, mime, 0.95));
+    return new Promise((resolve) => cv.toBlob(resolve, mime, JPEG_QUALITY));
   }
 
   async download(im = this.current) {
