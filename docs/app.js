@@ -145,6 +145,9 @@ export class Labeler {
     this.textOnly = false;
     this.press = null; this.mode = null; this.moved = false; this.grab = [0, 0];
     this.rubber = null;
+    this.base = null;            // screen-sized copy of the current photo, redrawn from on every refresh
+    this._raf = 0;
+    this._loadToken = 0;
     this.entry = null;
     this.scale = 1; this.offset = [0, 0]; this.boxes = [];
     this.buildDom();
@@ -281,7 +284,7 @@ export class Labeler {
     this.stage.addEventListener('dragover', (e) => { e.preventDefault(); this.stage.classList.add('bbl-over'); });
     this.stage.addEventListener('dragleave', () => this.stage.classList.remove('bbl-over'));
     this.stage.addEventListener('drop', (e) => { e.preventDefault(); this.stage.classList.remove('bbl-over'); this.openFiles(e.dataTransfer.files); });
-    if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => this.refresh()).observe(this.stage);
+    if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => this.requestRefresh()).observe(this.stage);
     else window.addEventListener('resize', () => this.refresh());
     window.addEventListener('beforeunload', (e) => { if (this.images.some((im) => im.dirty)) { e.preventDefault(); e.returnValue = ''; } });
   }
@@ -309,31 +312,53 @@ export class Labeler {
       .sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name, undefined, { numeric: true }));
     if (!list.length) { this.flash('No photos found there.'); return; }
     const firstNew = this.images.length;
-    const failed = [];
     for (const f of list) {
       const key = `${f.name}|${f.size}|${f.lastModified}`;
       if (this.images.some((im) => im.key === key)) continue;
-      let bitmap;
-      try {
-        if (isHeic(f)) this.status(`Decoding ${f.name}...`);
-        bitmap = await this.decode(f);
-      } catch (err) {
-        console.warn('could not open', f.name, err);
-        failed.push(f.name);
-        continue;
-      }
       const stored = this.saved[key];
+      // Photos are decoded on demand (see ensure/trim): a 12 MP photo is ~48 MB decoded,
+      // so only the current one and its neighbours are kept in memory.
       this.images.push({
-        name: f.name, type: f.type, key, bitmap, width: bitmap.width, height: bitmap.height,
+        name: f.name, type: f.type, key, file: f, bitmap: null, decoding: null, broken: false, width: 0, height: 0,
         labels: stored ? stored.map((l) => ({ ...l })) : [], undo: [], redo: [], dirty: false,
       });
     }
-    if (this.index < 0 && this.images.length) this.load(0);
-    this.refresh();                      // redraw first: flash() must be the last thing to touch the status line
-    const notes = [];
-    if (this.images.length > firstNew && firstNew > 0) notes.push(`Added ${this.images.length - firstNew} photo(s); ${this.images.length} in the queue.`);
-    if (failed.length) notes.push(`Could not open: ${failed.join(', ')}`);
-    if (notes.length) this.flash(notes.join('   '));
+    if (this.index < 0 && this.images.length) await this.load(0);
+    else this.refresh();                 // redraw first: flash() must be the last thing to touch the status line
+    const added = this.images.length - firstNew;
+    if (added && firstNew > 0) this.flash(`Added ${added} photo(s); ${this.images.length} in the queue.`);
+  }
+
+  /** Decode a photo if it is not decoded yet. */
+  ensure(im) {
+    if (im.bitmap) return Promise.resolve(im.bitmap);
+    if (!im.decoding) {
+      im.decoding = this.decode(im.file).then((bmp) => {
+        im.bitmap = bmp; im.width = bmp.width; im.height = bmp.height; im.decoding = null;
+        return bmp;
+      }, (err) => { im.decoding = null; im.broken = true; throw err; });
+    }
+    return im.decoding;
+  }
+
+  /** Free decoded pixels for photos that are not the current one or its neighbours. */
+  trim() {
+    this.images.forEach((im, i) => {
+      if (Math.abs(i - this.index) <= 1 || !im.bitmap || im.decoding) return;
+      if (typeof im.bitmap.close === 'function') im.bitmap.close();
+      im.bitmap = null;
+    });
+  }
+
+  /** Decode the neighbours in the background so N/P feel instant. */
+  prefetch() {
+    const run = () => {
+      for (const j of [this.index + 1, this.index - 1]) {
+        const im = this.images[j];
+        if (im && !im.bitmap && !im.broken) this.ensure(im).catch(() => {});
+      }
+    };
+    (window.requestIdleCallback || ((f) => setTimeout(f, 50)))(run);
   }
 
   async decode(file) {
@@ -376,11 +401,31 @@ export class Labeler {
     this.refresh();
   }
 
-  load(i) {
+  async load(i) {
     this.cancelEntry();
     this.index = i;
     this.selected = null;
+    const im = this.current;
+    const token = ++this._loadToken;
+    if (!im.bitmap) {
+      this.refresh();
+      this.status(`Opening ${im.name}...`);
+      try {
+        await this.ensure(im);
+      } catch (err) {
+        console.warn('could not open', im.name, err);
+        if (token !== this._loadToken) return;
+        this.images.splice(i, 1);
+        if (this.images.length) await this.load(Math.min(i, this.images.length - 1));
+        else { this.index = -1; this.refresh(); }
+        this.flash(`Could not open ${im.name}; removed from the queue.`);
+        return;
+      }
+    }
+    if (token !== this._loadToken) return;      // a newer load superseded this one
+    this.trim();
     this.refresh();
+    this.prefetch();
   }
 
   step(d) {
@@ -397,8 +442,9 @@ export class Labeler {
     return { name: `${stem}_labeled.${png ? 'png' : 'jpg'}`, mime: png ? 'image/png' : 'image/jpeg' };
   }
 
-  /** Full-resolution render of one image. */
+  /** Full-resolution render of one (decoded) image. */
   renderFull(im = this.current) {
+    if (!im.bitmap) throw new Error(`${im.name} is not decoded`);
     const cv = document.createElement('canvas');
     cv.width = im.width; cv.height = im.height;
     const ctx = cv.getContext('2d');
@@ -409,13 +455,15 @@ export class Labeler {
 
   async saveBlob(im = this.current) {
     const { mime } = this.outputName(im);
+    await this.ensure(im);
     const cv = this.renderFull(im);
     return new Promise((resolve) => cv.toBlob(resolve, mime, JPEG_QUALITY));
   }
 
   async download(im = this.current) {
-    if (!im) return;
-    const blob = await this.saveBlob(im);
+    if (!im) return false;
+    let blob;
+    try { blob = await this.saveBlob(im); } catch (err) { console.warn('could not save', im.name, err); this.flash(`Could not open ${im.name}.`); return false; }
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = this.outputName(im).name;
@@ -423,6 +471,7 @@ export class Labeler {
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
     im.dirty = false;
     this.persist();
+    return true;
   }
 
   async saveAndNext() {
@@ -436,6 +485,7 @@ export class Labeler {
   async saveAll() {
     this.commitEntry();
     for (const im of this.images) if (im.labels.length) await this.download(im);
+    this.trim();
     this.refresh();
   }
 
@@ -472,7 +522,7 @@ export class Labeler {
     }
     this.canvas.style.width = `${cw}px`; this.canvas.style.height = `${ch}px`;
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (!im) return;
+    if (!im || !im.bitmap) return;
     this.scale = Math.min(cw / im.width, ch / im.height);
     const dw = im.width * this.scale, dh = im.height * this.scale;
     this.offset = [(cw - dw) / 2, (ch - dh) / 2];
@@ -512,15 +562,37 @@ export class Labeler {
   }
 
   // ---- drawing --------------------------------------------------------- //
+  /** Redraw at most once per screen frame (used during drags and resizes). */
+  requestRefresh() {
+    if (this._raf) return;
+    this._raf = requestAnimationFrame(() => { this._raf = 0; this.refresh(); });
+  }
+
+  /** The current photo pre-scaled to screen size, so a redraw is a cheap 1:1 blit
+   *  instead of rescaling the full-resolution photo every time. */
+  baseFor(im, dw, dh) {
+    const dpr = window.devicePixelRatio || 1;
+    const pw = Math.max(1, Math.round(dw * dpr)), ph = Math.max(1, Math.round(dh * dpr));
+    const b = this.base;
+    if (b && b.im === im && b.canvas.width === pw && b.canvas.height === ph) return b.canvas;
+    const canvas = document.createElement('canvas');
+    canvas.width = pw; canvas.height = ph;
+    canvas.getContext('2d').drawImage(im.bitmap, 0, 0, pw, ph);
+    this.base = { im, canvas };
+    return canvas;
+  }
+
   refresh() {
+    if (this._raf) { cancelAnimationFrame(this._raf); this._raf = 0; }
     this.layout();
     const im = this.current;
     const ctx = this.ctx;
     const cw = parseFloat(this.canvas.style.width), ch = parseFloat(this.canvas.style.height);
     ctx.clearRect(0, 0, cw, ch);
     this.dropEl.hidden = !!im;
-    if (!im) { this.boxes = []; this.status(); return; }
-    ctx.drawImage(im.bitmap, this.offset[0], this.offset[1], im.width * this.scale, im.height * this.scale);
+    if (!im || !im.bitmap) { this.boxes = []; this.status(); return; }
+    const dw = im.width * this.scale, dh = im.height * this.scale;
+    ctx.drawImage(this.baseFor(im, dw, dh), this.offset[0], this.offset[1], dw, dh);
     this.boxes = drawLabels(ctx, im.labels, im.width, this.style, this.scale, this.offset[0], this.offset[1]);
     if (this.selected !== null && this.boxes[this.selected]) {
       const [x0, y0, x1, y1] = this.boxes[this.selected];
@@ -559,7 +631,7 @@ export class Labeler {
 
   // ---- pointer --------------------------------------------------------- //
   onPress(e) {
-    if (!this.current || e.button !== 0) return;
+    if (!this.current || !this.current.bitmap || e.button !== 0) return;
     if (this.entry) this.commitEntry();
     try { this.canvas.setPointerCapture(e.pointerId); } catch { /* synthetic event */ }
     const [x, y] = this.pos(e);
@@ -583,7 +655,7 @@ export class Labeler {
     if (this.mode === 'new') this.rubber = { text: [x, y], tip: this.press };
     else if (this.mode === 'move' && lb) { [lb.x, lb.y] = this.toImage(x - this.grab[0], y - this.grab[1]); this.current.dirty = true; }
     else if (this.mode === 'tip' && lb) { lb.tip = this.toImage(x, y); this.current.dirty = true; }
-    this.refresh();
+    this.requestRefresh();
   }
   onRelease(e) {
     if (!this.press) return;

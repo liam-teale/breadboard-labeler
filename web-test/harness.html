@@ -237,6 +237,8 @@
       check(stored[key1].length === 6 && stored[key1][0].fill === '#FF00FF' && stored[key1][0].marker === 2.75, 'labels persisted to localStorage with colour and size');
       key('n'); check(app.index === 1 && app.current.labels.length === 0 && app.selected === null, 'N moves to the next image, clean');
       check(app.current.undo.length === 0, 'undo history is per image');
+      await tick(200);   // the next photo decodes on demand
+      check(!!app.current.bitmap && app.current.width === 1200, 'next photo decoded on demand');
       click(0.36, 0.40); type('220 Ω');
       key('p'); check(app.index === 0 && app.current.labels.length === 6, 'P goes back and labels are still there');
       key('n'); check(app.current.labels[0].text === '220 Ω', 'image 2 labels kept');
@@ -274,10 +276,9 @@
       check(heicOut && heicOut.type === 'image/jpeg' && heicOut.size > 1000, `HEIC output blob is a jpeg (${heicOut && heicOut.size} bytes)`);
       // 10-bit HEIC (what iPhone 15+ shoots by default)
       const heic10 = new File([await (await fetch('./sample10.heic')).blob()], 'IMG_0004.heic', { type: 'image/heic', lastModified: 1700000000002 });
-      await app4.openFiles([heic10]); await tick();
-      check(app4.images.length === 2 && app4.images[1].width === 640, `10-bit HEIC decoded: ${app4.images.length === 2 ? app4.images[1].width + 'x' + app4.images[1].height : app4.statusEl.textContent}`);
+      await app4.openFiles([heic10]); await app4.load(1);
+      check(app4.images.length === 2 && app4.current.width === 640, `10-bit HEIC decoded: ${app4.images.length === 2 ? app4.current.width + 'x' + app4.current.height : app4.statusEl.textContent}`);
       if (app4.images.length === 2) {
-        app4.load(1);
         const cv10 = app4.renderFull();
         const p10 = px(cv10, 340, 240);
         check(p10.startsWith('#F') && p10.slice(3, 5) < '40', `10-bit red region decoded with plausible colour: ${p10}`);
@@ -290,9 +291,44 @@
         out.push(`INFO old decoder (heic2any 0.0.4) on the 10-bit file: ${oldOk ? 'decoded fine' : 'FAILED: ' + oldErr}`);
       } catch { out.push('INFO old decoder could not be loaded for comparison'); }
       const bad = new File([new Uint8Array([1, 2, 3, 4])], 'broken.heic', { type: 'image/heic' });
-      await app4.openFiles([bad]); await tick();
-      check(app4.images.length === 2 && app4.statusEl.textContent.includes('Could not open'), `a broken file is reported, not fatal (images=${app4.images.length}, status="${app4.statusEl.textContent}")`);
+      await app4.openFiles([bad]); await app4.load(2);
+      check(app4.images.length === 2 && app4.index === 1 && !!app4.current.bitmap && app4.statusEl.textContent.includes('Could not open'),
+        `a broken file is reported and dropped, not fatal (images=${app4.images.length}, index=${app4.index}, status="${app4.statusEl.textContent}")`);
       app4.container.remove();
+
+      // ---- memory: decode on demand, keep only current +/- 1 -------------------
+      const app5 = new Labeler(document.createElement('div'));
+      document.body.appendChild(app5.container);
+      const many = [];
+      for (let i = 0; i < 5; i++) many.push(await toFile(makeBoard(300, 200), `m${i}.png`, 'image/png'));
+      await app5.openFiles(many); await tick(300);
+      const decoded = () => app5.images.map((im, i) => (im.bitmap ? i : null)).filter((i) => i !== null);
+      check(app5.index === 0 && app5.current.bitmap && decoded().length <= 2, `opening 5 photos decodes at most the first two: ${JSON.stringify(decoded())}`);
+      await app5.load(4); await tick(300);
+      check(app5.images[0].bitmap === null && app5.images[1].bitmap === null && app5.images[4].bitmap && decoded().length <= 2,
+        `far photos are evicted after navigating: decoded=${JSON.stringify(decoded())}`);
+      await app5.load(0);
+      check(!!app5.current.bitmap && app5.current.width === 300, 'an evicted photo re-decodes when you come back');
+      app5.container.remove();
+
+      // ---- rendering: drag redraws are coalesced to one per frame -------------
+      app.load(0); await tick(100);
+      {
+        const p0 = labelDisp(0);
+        ptr('pointerdown', p0);
+        let redraws = 0; const orig = app.refresh;
+        app.refresh = function () { redraws++; return orig.apply(this); };
+        for (let i = 1; i <= 20; i++) ptr('pointermove', [p0[0] + 10 + i, p0[1] + 10 + i]);
+        check(redraws === 0, `20 pointer moves triggered no synchronous redraws (${redraws})`);
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        check(redraws === 1, `then exactly one redraw on the next frame (${redraws})`);
+        ptr('pointerup', [p0[0] + 30, p0[1] + 30]);
+        app.refresh = orig;
+        const b1 = app.base && app.base.canvas; app.refresh(); const b2 = app.base && app.base.canvas;
+        check(b1 && b1 === b2 && b1.width === Math.round(app.current.width * app.scale * (window.devicePixelRatio || 1)),
+          'redraws reuse the screen-sized copy of the photo instead of rescaling the original');
+        key('z');
+      }
 
       // screenshot state for a visual check
       app.load(0); app.selected = 0; app.refresh();
