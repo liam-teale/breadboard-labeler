@@ -7,8 +7,8 @@ Usage:
     python label_images.py a.jpg b.jpg ...     # or list them
     python label_images.py PATH/TO/FOLDER      # or give a folder
 
-A label has three parts: the text, a small square on the part it refers to,
-and a line joining them.
+A label has three parts: the text on a solid coloured box, a solid square on
+the part it refers to, and a line joining them.
 
 Mouse:
     click on a part         square there, text placed beside it (drag it later)
@@ -17,13 +17,14 @@ Mouse:
     drag a label            move the text (its square stays put)
     drag a square           move the square
     click a label           select it (for Delete / recolour / resize)
+    Ctrl+Z / Ctrl+Y         undo / redo (same as Z / Y)
     double-click a label    edit its text
 Keys (when not typing a label):
     Enter / Esc      place / cancel the label you are typing
     S                save this image and go to the next one
     N / P            next / previous image without saving
     O                open more images
-    Z                undo the last label
+    Z / Y            undo / redo
     Delete           delete the selected label
     + / -            bigger / smaller text (remembered for next time)
     [ / ]            smaller / bigger square (selected label, or default for new ones)
@@ -37,6 +38,7 @@ Output: <name>_labeled.<ext> next to the original. Labels are also kept in
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import sys
@@ -183,9 +185,9 @@ def get_font(px: int):
 
 
 def metrics(full_width: int, style: Style, scale: float) -> tuple[int, int, int]:
-    """(font px, stroke px, leader line px) for an image of full_width shown at scale."""
+    """(font px, box padding px, leader line px) for an image of full_width shown at scale."""
     font_px = max(6, round(full_width * style.font_pct / 100 * scale))
-    return font_px, max(1, round(font_px * 0.12)), max(2, round(font_px * 0.18))
+    return font_px, max(2, round(font_px * 0.3)), max(2, round(font_px * 0.16))
 
 
 def render(img: Image.Image, labels: list[Label], style: Style, scale: float = 1.0,
@@ -195,36 +197,36 @@ def render(img: Image.Image, labels: list[Label], style: Style, scale: float = 1
     given, it receives each label's text bbox in img pixels (for hit-testing)."""
     out = img.copy()
     draw = ImageDraw.Draw(out)
-    font_px, stroke, line_w = metrics(full_width or img.width, style, scale)
+    font_px, pad, line_w = metrics(full_width or img.width, style, scale)
     font = get_font(font_px)
+    edge = max(1, round(line_w * 0.4))
 
     for lb in labels:
         cx, cy = lb.x * scale, lb.y * scale
-        bbox = draw.textbbox((cx, cy), lb.text, font=font, anchor="mm", stroke_width=stroke)
+        tb = draw.textbbox((cx, cy), lb.text, font=font, anchor="mm")
+        box = (tb[0] - pad, tb[1] - pad * 0.6, tb[2] + pad, tb[3] + pad * 0.6)
         if boxes_out is not None:
-            boxes_out.append(bbox)
+            boxes_out.append(box)
         if lb.tip is not None:
             tx, ty = lb.tip[0] * scale, lb.tip[1] * scale
             side = max(4, (full_width or img.width) * lb.marker / 100 * scale)
-            _draw_leader(draw, bbox, (cx, cy), (tx, ty), side, line_w, lb.fill, lb.outline)
-        draw.text((cx, cy), lb.text, font=font, anchor="mm",
-                  fill=lb.fill, stroke_width=stroke, stroke_fill=lb.outline)
+            _draw_leader(draw, box, (cx, cy), (tx, ty), side, line_w, edge, lb.fill, lb.outline)
+        draw.rounded_rectangle(box, radius=pad * 0.5, fill=lb.fill, outline=lb.outline, width=edge)
+        draw.text((cx, cy), lb.text, font=font, anchor="mm", fill=lb.outline)
     return out
 
 
-def _draw_leader(draw, bbox, centre, tip, side: float, w: int, fill: str, outline: str) -> None:
-    """Hollow square of the given side centred on tip, joined to the text box by a line."""
+def _draw_leader(draw, box, centre, tip, side: float, w: int, edge: int, fill: str, outline: str) -> None:
+    """Solid square of the given side centred on tip, joined to the text box by a line."""
     cx, cy = centre
     tx, ty = tip
-    edge = max(1, round(w * 0.45))
     half = side / 2
     dx, dy = tx - cx, ty - cy
     dist = math.hypot(dx, dy)
     if dist >= 1:
-        # line runs from where the centre->tip ray leaves the (padded) text box ...
-        pad = w
-        half_w = (bbox[2] - bbox[0]) / 2 + pad
-        half_h = (bbox[3] - bbox[1]) / 2 + pad
+        # line runs from where the centre->tip ray leaves the text box ...
+        half_w = (box[2] - box[0]) / 2
+        half_h = (box[3] - box[1]) / 2
         t0 = min(half_w / abs(dx) if dx else math.inf, half_h / abs(dy) if dy else math.inf, 1.0)
         sx, sy = cx + dx * t0, cy + dy * t0
         # ... to where it enters the square
@@ -233,9 +235,7 @@ def _draw_leader(draw, bbox, centre, tip, side: float, w: int, fill: str, outlin
         if math.hypot(ex - sx, ey - sy) > w:
             draw.line([(sx, sy), (ex, ey)], fill=outline, width=w + 2 * edge)
             draw.line([(sx, sy), (ex, ey)], fill=fill, width=w)
-    box = [tx - half, ty - half, tx + half, ty + half]
-    draw.rectangle([box[0] - edge, box[1] - edge, box[2] + edge, box[3] + edge], outline=outline, width=w + 2 * edge)
-    draw.rectangle(box, outline=fill, width=w)
+    draw.rectangle([tx - half, ty - half, tx + half, ty + half], fill=fill, outline=outline, width=edge)
 
 
 # --------------------------------------------------------------------------- #
@@ -267,6 +267,8 @@ class App:
         self.photo: ImageTk.PhotoImage | None = None
         self.dirty = False
         self.saved_count = 0
+        self.undo_stack: list[list[Label]] = []
+        self.redo_stack: list[list[Label]] = []
         self._flash_job = None
         self._resize_job = None
 
@@ -300,8 +302,37 @@ class App:
         img = ImageOps.exif_transpose(img)
         self.full = img.convert("RGB")
         self.labels = self.load_sidecar()
+        self.undo_stack.clear()
+        self.redo_stack.clear()
         self.dirty = False
         self.preview_base = None
+        self.refresh()
+
+    # ---- undo / redo ------------------------------------------------------- #
+    def snapshot(self) -> None:
+        """Call before any change to the labels."""
+        self.undo_stack.append(copy.deepcopy(self.labels))
+        del self.undo_stack[:-100]
+        self.redo_stack.clear()
+
+    def undo(self) -> None:
+        if not self.undo_stack:
+            self.flash("Nothing to undo.")
+            return
+        self.redo_stack.append(copy.deepcopy(self.labels))
+        self.labels = self.undo_stack.pop()
+        self.selected = None
+        self.dirty = True
+        self.refresh()
+
+    def redo(self) -> None:
+        if not self.redo_stack:
+            self.flash("Nothing to redo.")
+            return
+        self.undo_stack.append(copy.deepcopy(self.labels))
+        self.labels = self.redo_stack.pop()
+        self.selected = None
+        self.dirty = True
         self.refresh()
 
     def load_sidecar(self) -> list[Label]:
@@ -415,7 +446,7 @@ class App:
                f"labels: {len(self.labels)}{'*' if self.dirty else ''}{sel}    "
                f"text {self.style.font_pct:.2g}%  square {self.style.marker_pct:.2g}%  colour {self.style.fill}    "
                f"|  click part = label   drag = choose text spot   shift-click = text only   dbl-click = edit   "
-               f"S save+next   N/P   O open   Z undo   Del   +/- text   [/] square   C/K colour   Q quit")
+               f"S save+next   N/P   O open   Z/Y undo/redo   Del   +/- text   [/] square   C/K colour   Q quit")
         if extra:
             msg = extra + "    |    " + msg
         self.status.config(text=msg)
@@ -489,6 +520,8 @@ class App:
                 self.grab_offset = (e.x - lx, e.y - ly)
             else:
                 self.mode, self.selected = "new", None
+        if self.mode in ("move", "tip"):
+            self.snapshot()
         self.refresh()
 
     def on_drag(self, e) -> None:
@@ -522,6 +555,8 @@ class App:
         if self.rubber is not None:
             self.canvas.delete("rubber")
             self.rubber = None
+        if mode in ("move", "tip") and not moved and self.undo_stack:
+            self.undo_stack.pop()       # plain click on a label: nothing changed
         if mode != "new" or self.entry is not None:
             return                      # finished a move/tip drag, or a double-click opened the editor
         shift = bool(e.state & 0x1)
@@ -590,6 +625,8 @@ class App:
         editing = self.editing
         self.cancel_entry()
         if editing is not None:
+            if text != self.labels[editing].text:
+                self.snapshot()
             if text:
                 self.labels[editing].text = text
             else:
@@ -597,6 +634,7 @@ class App:
                 self.selected = None
             self.dirty = True
         elif text:
+            self.snapshot()
             self.labels.append(Label(pos[0], pos[1], text, tip, self.style.fill, self.style.marker_pct))
             self.dirty = True
         self.refresh()
@@ -616,6 +654,7 @@ class App:
     def apply_colour(self, fill: str) -> None:
         """Recolour the selected label if there is one, otherwise set the colour for new labels."""
         if self.selected is not None:
+            self.snapshot()
             self.labels[self.selected].fill = fill
             self.dirty = True
         else:
@@ -631,6 +670,7 @@ class App:
 
     def delete_selected(self) -> None:
         if self.selected is not None:
+            self.snapshot()
             del self.labels[self.selected]
             self.selected = None
             self.dirty = True
@@ -651,11 +691,9 @@ class App:
         elif k == "o":
             self.open_more()
         elif k == "z":
-            if self.labels:
-                self.labels.pop()
-                self.selected = None
-                self.dirty = True
-                self.refresh()
+            self.undo()
+        elif k == "y":
+            self.redo()
         elif k in ("delete", "backspace"):
             self.delete_selected()
         elif k == "escape":
@@ -677,6 +715,7 @@ class App:
         elif k in ("bracketleft", "bracketright"):
             delta = 0.25 if k == "bracketright" else -0.25
             if self.selected is not None:
+                self.snapshot()
                 lb = self.labels[self.selected]
                 lb.marker = min(20.0, max(0.5, round(lb.marker + delta, 2)))
                 self.dirty = True

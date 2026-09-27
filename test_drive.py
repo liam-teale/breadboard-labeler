@@ -236,7 +236,14 @@ def run():
     at(nxt(), lambda: click(0.50, 0.75))
     at(nxt(), lambda: type_and_enter("oops"))
     at(nxt(), lambda: key("z"))
-    at(nxt(), lambda: check(len(app.labels) == 2 and app.labels[-1].text == "LED (red)", "Z undoes last label"))
+    at(nxt(), lambda: check(len(app.labels) == 2 and app.labels[-1].text == "LED (red)", "Z undoes the last added label"))
+    at(nxt(), lambda: key("y"))
+    at(nxt(), lambda: check(len(app.labels) == 3 and app.labels[-1].text == "oops", "Y redoes it"))
+    at(nxt(), lambda: key("z"))
+    at(nxt(), lambda: check(len(app.labels) == 2, "Z again removes it again"))
+    at(nxt(), lambda: key("y")); at(nxt(), lambda: key("y"))
+    at(nxt(), lambda: check(len(app.labels) == 3 and "Nothing to redo" in app.status.cget("text"), "extra Y just flashes"))
+    at(nxt(), lambda: key("z"))
     # empty entry + Enter adds nothing
     at(nxt(), lambda: click(0.50, 0.75))
     at(nxt(), lambda: type_and_enter(""))
@@ -268,6 +275,16 @@ def run():
     at(t[0], lambda: check(app.selected == 0 and len(c.find_withtag("sel")) == 1, "moved label is selected and highlighted"))
     at(t[0], lambda: check(near(app.labels[0].tip[0], 0.36 * 4000) and near(app.labels[0].tip[1], 0.38 * 3000),
                            "square stays put while the text moves"))
+    at(nxt(), lambda: key("z"))
+    at(nxt(), lambda: check(near(app.labels[0].x, 0.45 * 4000) and len(app.labels) == 5, "Z undoes a move"))
+    at(nxt(), lambda: key("y"))
+    at(nxt(), lambda: check(near(app.labels[0].x, 0.46 * 4000), "Y redoes the move"))
+    at(nxt(), lambda: click_label(0))
+    at(nxt(), lambda: key("z"))
+    at(nxt(), lambda: check(near(app.labels[0].x, 0.45 * 4000) and len(app.labels) == 5,
+                            "a plain click on a label leaves no undo step, so Z undoes the move again"))
+    at(nxt(), lambda: key("y"))
+    at(nxt(), lambda: check(near(app.labels[0].x, 0.46 * 4000), "Y re-applies the move"))
     at(nxt(), lambda: shot(root, "05_after_move"))
     at(nxt(), lambda: drag(0.62, 0.435, 0.62, 0.50))         # grab the LED square and move it down
     at(nxt(), lambda: check(near(app.labels[1].tip[0], 0.62 * 4000) and near(app.labels[1].tip[1], 0.50 * 3000),
@@ -282,6 +299,11 @@ def run():
     at(nxt(), lambda: key("k"))
     at(nxt(), lambda: check(app.labels[0].fill == "#FF00FF" and app.labels[0].outline == "#FFFFFF",
                             f"K picks a custom colour with auto outline: {app.labels[0].fill}/{app.labels[0].outline}"))
+    at(nxt(), lambda: key("z"))
+    at(nxt(), lambda: check(app.labels[0].fill == li.COLOURS[1], "Z undoes a recolour"))
+    at(nxt(), lambda: key("y"))
+    at(nxt(), lambda: check(app.labels[0].fill == "#FF00FF", "Y redoes the recolour"))
+    at(nxt(), lambda: click_label(0))                        # undo/redo clear the selection
     at(nxt(), lambda: key("bracketright"))
     at(nxt(), lambda: check(app.labels[0].marker == 2.75 and app.style.marker_pct == 2.5,
                             "] with a selection grows only that label's square"))
@@ -295,6 +317,10 @@ def run():
     at(nxt(), lambda: key("Delete"))                          # ... and delete it
     at(nxt(), lambda: check([l.text for l in app.labels] == ["R1 10k", "LED (red)", "VCC", "GND wires"],
                             f"Delete removes the selected label: {[l.text for l in app.labels]}"))
+    at(nxt(), lambda: key("z"))
+    at(nxt(), lambda: check(len(app.labels) == 5 and app.labels[2].text == "555 timer", "Z restores a deleted label"))
+    at(nxt(), lambda: key("y"))
+    at(nxt(), lambda: check(len(app.labels) == 4, "Y deletes it again"))
     at(nxt(), lambda: click(0.52, 0.605))                    # put it back
     at(nxt(), lambda: type_and_enter("555 timer"))
     at(nxt(), lambda: double_click_label(2))                 # edit "VCC"
@@ -337,6 +363,7 @@ def run():
     at(t[0], lambda: check(li.output_path(f1, style).exists(), "output jpg written"))
     at(t[0], lambda: check(li.sidecar_path(f1).exists(), "sidecar json written"))
     at(t[0], lambda: check(len(app.labels) == 0 and not app.dirty and app.selected is None, "next image starts clean"))
+    at(t[0], lambda: check(not app.undo_stack and not app.redo_stack, "undo history does not leak between images"))
     # image 2: one clicked label, one dragged, then go back and check preload
     at(nxt(), lambda: click(0.36, 0.40))
     at(nxt(), lambda: type_and_enter("220 Ω"))
