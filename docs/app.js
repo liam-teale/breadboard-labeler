@@ -18,6 +18,28 @@ const IMAGE_NAME = /\.(jpe?g|png|webp|gif|bmp|avif|tiff?|heic|heif)$/i;
 const HEIC_NAME = /\.hei[cf]$/i;
 const OUTPUT_NAME = /_labeled(_\d+)?\.[^.]+$/i;
 
+// File System Access API (Chrome, Edge): durable file/folder handles that survive a
+// reload, and permission to write labelled copies next to the originals.
+export const FS_ACCESS = typeof window !== 'undefined' && typeof window.showOpenFilePicker === 'function';
+const PICKER_TYPES = [{ description: 'Photos', accept: { 'image/*': ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tif', '.tiff', '.heic', '.heif'] } }];
+
+function idb() {
+  return new Promise((resolve, reject) => {
+    const r = indexedDB.open('bbl', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('kv');
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+}
+async function idbGet(key) {
+  const db = await idb();
+  return new Promise((resolve, reject) => { const t = db.transaction('kv').objectStore('kv').get(key); t.onsuccess = () => resolve(t.result); t.onerror = () => reject(t.error); });
+}
+async function idbSet(key, value) {
+  const db = await idb();
+  return new Promise((resolve, reject) => { const t = db.transaction('kv', 'readwrite').objectStore('kv').put(value, key); t.onsuccess = () => resolve(); t.onerror = () => reject(t.error); });
+}
+
 export function isHeic(file) {
   return /^image\/hei[cf]$/i.test(file.type) || HEIC_NAME.test(file.name);
 }
@@ -120,7 +142,7 @@ const HELP = [
   ['Click a label', 'select it'],
   ['Double-click a label', 'edit its text'],
   ['Enter / Esc', 'place / cancel the text you are typing'],
-  ['S', 'save this photo (downloads a new name_labeled copy) and go to the next'],
+  ['S', 'save this photo (a new name_labeled copy, into its folder or Downloads) and go to the next'],
   ['O / F', 'open more photos / a whole folder'],
   ['N / P', 'next / previous photo'],
   ['Z / Y', 'undo / redo'],
@@ -133,12 +155,14 @@ const HELP = [
 ];
 
 export class Labeler {
-  constructor(container) {
+  constructor(container, opts = {}) {
     this.container = container;
+    this.opts = opts;
     this.images = [];          // {name, type, key, bitmap, width, height, labels, undo, redo, dirty}
     this.index = -1;
-    this.style = Object.assign({ fontPct: 3, markerPct: 2.5, fill: COLOURS[0], format: 'jpg' }, loadJSON(STYLE_KEY, {}));
+    this.style = Object.assign({ fontPct: 3, markerPct: 2.5, fill: COLOURS[0], format: 'jpg', saveTo: 'folder' }, loadJSON(STYLE_KEY, {}));
     if (!['jpg', 'png'].includes(this.style.format)) this.style.format = 'jpg';
+    if (!['folder', 'download'].includes(this.style.saveTo)) this.style.saveTo = 'folder';
     this.saved = loadJSON(LABELS_KEY, {});
     this.custom = (loadJSON(PRESETS_KEY, []) || []).filter((c) => /^#[0-9A-F]{6}$/i.test(c)).map((c) => c.toUpperCase());
     this.selected = null;
@@ -153,6 +177,7 @@ export class Labeler {
     this.buildDom();
     this.bind();
     this.refresh();
+    if (opts.resume !== false) this.checkSession();
   }
 
   // ---- DOM ------------------------------------------------------------- //
@@ -161,7 +186,7 @@ export class Labeler {
     c.classList.add('bbl');
     c.innerHTML = `
       <div class="bbl-toolbar">
-        <label class="bbl-btn bbl-primary">Open photos<input type="file" accept="image/*,.heic,.heif" multiple hidden></label>
+        <label class="bbl-btn bbl-primary bbl-open-photos">Open photos<input type="file" accept="image/*,.heic,.heif" multiple hidden></label>
         <label class="bbl-btn bbl-folder">Open folder<input type="file" class="bbl-folder-input" webkitdirectory multiple hidden></label>
         <button data-act="prev" title="Previous (P)">&#9664;</button>
         <span class="bbl-count"></span>
@@ -170,6 +195,9 @@ export class Labeler {
         <button data-act="saveAll" title="Download every photo that has labels">Save all</button>
         <select class="bbl-format" title="Output format for every save, whatever the input was">
           <option value="jpg">as JPG</option><option value="png">as PNG</option>
+        </select>
+        <select class="bbl-saveto" hidden title="Where saves go. Photos opened with Open folder can be saved next to the originals.">
+          <option value="folder">into folder</option><option value="download">to Downloads</option>
         </select>
         <span class="bbl-sep"></span>
         <button data-act="undo" title="Undo (Z)">&#8630;</button>
@@ -189,12 +217,16 @@ export class Labeler {
       <div class="bbl-stage">
         <canvas class="bbl-canvas"></canvas>
         <input class="bbl-entry" hidden spellcheck="false">
-        <div class="bbl-drop">Drop photos here, or use Open photos</div>
+        <div class="bbl-drop"><div>Drop photos here, or use Open photos</div><button class="bbl-resume" hidden>Reopen last session</button></div>
         <div class="bbl-help" hidden>${HELP.map(([k, v]) => `<div><b>${k}</b><span>${v}</span></div>`).join('')}</div>
       </div>`;
     this.fileInput = c.querySelector('input[type=file]');
     this.folderInput = c.querySelector('.bbl-folder-input');
-    if (!('webkitdirectory' in this.folderInput)) c.querySelector('.bbl-folder').hidden = true;   // e.g. iOS Safari
+    if (!FS_ACCESS && !('webkitdirectory' in this.folderInput)) c.querySelector('.bbl-folder').hidden = true;   // e.g. iOS Safari
+    this.resumeBtn = c.querySelector('.bbl-resume');
+    this.saveToSelect = c.querySelector('.bbl-saveto');
+    this.saveToSelect.hidden = !FS_ACCESS;
+    this.saveToSelect.value = this.style.saveTo;
     this.canvas = c.querySelector('.bbl-canvas');
     this.ctx = this.canvas.getContext('2d');
     this.entryEl = c.querySelector('.bbl-entry');
@@ -257,6 +289,16 @@ export class Labeler {
     const c = this.container;
     this.fileInput.addEventListener('change', () => { this.openFiles(this.fileInput.files); this.fileInput.value = ''; });
     this.folderInput.addEventListener('change', () => { this.openFiles(this.folderInput.files); this.folderInput.value = ''; });
+    // with the File System Access API the labels open native pickers instead of the hidden inputs
+    c.querySelector('.bbl-open-photos').addEventListener('click', (e) => { if (FS_ACCESS) { e.preventDefault(); this.openPhotos(); } });
+    c.querySelector('.bbl-folder').addEventListener('click', (e) => { if (FS_ACCESS) { e.preventDefault(); this.openFolder(); } });
+    this.resumeBtn.addEventListener('click', async () => {
+      this.resumeBtn.disabled = true;
+      const ok = await this.restoreSession({ interactive: true });
+      this.resumeBtn.disabled = false;
+      if (!ok) this.flash('Could not reopen the last session; use Open photos or Open folder.');
+    });
+    this.saveToSelect.addEventListener('change', () => this.setSaveTo(this.saveToSelect.value));
     c.querySelector('.bbl-toolbar').addEventListener('click', (e) => {
       const b = e.target.closest('button'); if (!b) return;
       if (b.dataset.colour) { this.applyColour(b.dataset.colour); return; }
@@ -311,15 +353,22 @@ export class Labeler {
       .filter(isImageFile)
       .sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name, undefined, { numeric: true }));
     if (!list.length) { this.flash('No photos found there.'); return; }
+    await this.addEntries(list.map((file) => ({ file })));
+  }
+
+  /** entries: {file, handle?, dir?, path?}. handle/dir/path come from the File System Access API. */
+  async addEntries(entries) {
     const firstNew = this.images.length;
-    for (const f of list) {
+    for (const e of entries) {
+      const f = e.file;
       const key = `${f.name}|${f.size}|${f.lastModified}`;
       if (this.images.some((im) => im.key === key)) continue;
       const stored = this.saved[key];
       // Photos are decoded on demand (see ensure/trim): a 12 MP photo is ~48 MB decoded,
       // so only the current one and its neighbours are kept in memory.
       this.images.push({
-        name: f.name, type: f.type, key, file: f, bitmap: null, decoding: null, broken: false, width: 0, height: 0,
+        name: f.name, type: f.type, key, file: f, handle: e.handle || null, dir: e.dir || null, path: e.path || null,
+        bitmap: null, decoding: null, broken: false, width: 0, height: 0,
         labels: stored ? stored.map((l) => ({ ...l })) : [], undo: [], redo: [], dirty: false,
       });
     }
@@ -327,6 +376,170 @@ export class Labeler {
     else this.refresh();                 // redraw first: flash() must be the last thing to touch the status line
     const added = this.images.length - firstNew;
     if (added && firstNew > 0) this.flash(`Added ${added} photo(s); ${this.images.length} in the queue.`);
+    this.saveSession();
+  }
+
+  // ---- File System Access: pickers, folders, sessions, saving in place --- //
+  async openPhotos() {
+    if (!FS_ACCESS) { this.fileInput.click(); return; }
+    let handles;
+    try { handles = await window.showOpenFilePicker({ multiple: true, types: PICKER_TYPES }); } catch { return; }   // cancelled
+    const entries = [];
+    for (const h of handles) {
+      const file = await h.getFile();
+      if (isImageFile(file)) entries.push({ file, handle: h });
+    }
+    if (!entries.length) { this.flash('No photos found there.'); return; }
+    await this.addEntries(entries);
+  }
+
+  async openFolder() {
+    if (!FS_ACCESS) { this.folderInput.click(); return; }
+    let dir;
+    try { dir = await window.showDirectoryPicker({ mode: 'read' }); } catch { return; }   // cancelled
+    await this.openDirectoryHandle(dir);
+  }
+
+  /** Queue every original photo inside a folder handle (subfolders included). */
+  async openDirectoryHandle(dir) {
+    const entries = await this.listDirectory(dir, dir, []);
+    if (!entries.length) { this.flash('No photos found there.'); return; }
+    // top-level photos first, then subfolders; natural number order within each
+    entries.sort((a, b) => (a.path.length - b.path.length) || a.path.join('/').localeCompare(b.path.join('/'), undefined, { numeric: true }));
+    await this.addEntries(entries);
+  }
+
+  async listDirectory(root, dir, path, depth = 0) {
+    const out = [];
+    for await (const [name, h] of dir.entries()) {
+      if (h.kind === 'directory') {
+        if (depth < 3 && !name.startsWith('.')) out.push(...await this.listDirectory(root, h, [...path, name], depth + 1));
+        continue;
+      }
+      if (!IMAGE_NAME.test(name) || OUTPUT_NAME.test(name)) continue;
+      out.push({ file: await h.getFile(), handle: h, dir: root, path: [...path, name] });
+    }
+    return out;
+  }
+
+  /** Remember the open handles and position so a reload (or a discarded tab) can pick up where you left off. */
+  async saveSession() {
+    if (!FS_ACCESS) return;
+    const dirs = [], items = [];
+    for (const im of this.images) {
+      if (im.dir) {
+        let di = dirs.indexOf(im.dir);
+        if (di < 0) { di = dirs.length; dirs.push(im.dir); }
+        items.push({ dir: di, path: im.path });
+      } else if (im.handle) items.push({ handle: im.handle });
+    }
+    if (!items.length) return;           // opened through the fallback picker: nothing restorable
+    try { await idbSet('session', { dirs, items, index: Math.max(0, this.index), savedAt: Date.now() }); }
+    catch (err) { console.warn('session not saved', err); }
+  }
+
+  async clearSession() { try { await idbSet('session', null); } catch { /* ignore */ } }
+
+  /** On startup: reopen silently if permission is still granted, otherwise offer a button. */
+  async checkSession() {
+    if (!FS_ACCESS) return;
+    let session = null;
+    try { session = await idbGet('session'); } catch { return; }
+    if (!session || !session.items.length) return;
+    if (await this.restoreSession({ interactive: false, session })) return;
+    this.resumeBtn.textContent = `Reopen last session (${session.items.length} photo${session.items.length === 1 ? '' : 's'})`;
+    this.resumeBtn.hidden = false;
+  }
+
+  async restoreSession({ interactive, session = null } = {}) {
+    if (!FS_ACCESS) return false;
+    let s = session;
+    if (!s) { try { s = await idbGet('session'); } catch { return false; } }
+    if (!s || !s.items.length) return false;
+    const allowed = async (h) => {
+      let p = 'denied';
+      try { p = await h.queryPermission({ mode: 'read' }); } catch { return false; }
+      if (p !== 'granted' && interactive) { try { p = await h.requestPermission({ mode: 'read' }); } catch { /* needs a user gesture */ } }
+      return p === 'granted';
+    };
+    for (const d of s.dirs) if (!(await allowed(d))) return false;
+    const entries = [];
+    for (const it of s.items) {
+      try {
+        if (it.handle) {
+          if (!(await allowed(it.handle))) continue;
+          entries.push({ file: await it.handle.getFile(), handle: it.handle });
+        } else {
+          const dir = s.dirs[it.dir];
+          let h = dir;
+          for (const seg of it.path.slice(0, -1)) h = await h.getDirectoryHandle(seg);
+          const fh = await h.getFileHandle(it.path[it.path.length - 1]);
+          entries.push({ file: await fh.getFile(), handle: fh, dir, path: it.path });
+        }
+      } catch (err) { console.warn('could not restore', it, err); }
+    }
+    if (!entries.length) return false;
+    this.resumeBtn.hidden = true;
+    const before = this.images.length;
+    await this.addEntries(entries);
+    const target = before + Math.min(s.index, entries.length - 1);
+    if (target !== this.index && target < this.images.length) await this.load(target);
+    this.flash(`Reopened ${entries.length} photo(s) from last time.`);
+    return true;
+  }
+
+  setSaveTo(where) {
+    this.style.saveTo = where === 'download' ? 'download' : 'folder';
+    this.saveToSelect.value = this.style.saveTo;
+    saveJSON(STYLE_KEY, this.style);
+    this.refresh();
+  }
+
+  async canWrite(dir) {
+    try {
+      let p = await dir.queryPermission({ mode: 'readwrite' });
+      if (p !== 'granted') p = await dir.requestPermission({ mode: 'readwrite' });
+      return p === 'granted';
+    } catch { return false; }
+  }
+
+  /** First free name among base, base_2, base_3 ... in dir. Never an existing file. */
+  async uniqueName(dir, base) {
+    const dot = base.lastIndexOf('.');
+    const stem = base.slice(0, dot), ext = base.slice(dot);
+    for (let n = 1; n < 10000; n++) {
+      const name = n === 1 ? base : `${stem}_${n}${ext}`;
+      try { await dir.getFileHandle(name); } catch (err) { if (err.name === 'NotFoundError') return name; }
+    }
+    throw new Error(`too many copies of ${base}`);
+  }
+
+  /** Write the labelled copy next to the original (same subfolder). Returns false if not possible. */
+  async saveToFolder(im) {
+    if (!im.dir) return false;
+    if (!(await this.canWrite(im.dir))) return false;
+    let target = im.dir;
+    for (const seg of (im.path || []).slice(0, -1)) target = await target.getDirectoryHandle(seg);
+    const blob = await this.saveBlob(im);
+    const name = await this.uniqueName(target, this.outputName(im).name);
+    const fh = await target.getFileHandle(name, { create: true });
+    const w = await fh.createWritable();
+    await w.write(blob);
+    await w.close();
+    im.dirty = false;
+    this.persist();
+    this.flash(`Saved ${name} next to the original.`);
+    return true;
+  }
+
+  /** Save one photo: into its folder when possible and wanted, otherwise as a download. */
+  async save(im = this.current) {
+    if (!im) return false;
+    if (FS_ACCESS && this.style.saveTo === 'folder' && im.dir) {
+      try { if (await this.saveToFolder(im)) return true; }
+      catch (err) { console.warn('could not save into folder', im.name, err); this.flash(`Could not save into the folder (${err.message}); downloading instead.`); }
+    }
+    return this.download(im);
   }
 
   /** Decode a photo if it is not decoded yet. */
@@ -426,6 +639,7 @@ export class Labeler {
     this.trim();
     this.refresh();
     this.prefetch();
+    this.saveSession();
   }
 
   step(d) {
@@ -477,14 +691,14 @@ export class Labeler {
   async saveAndNext() {
     if (!this.current) return;
     this.commitEntry();
-    await this.download();
+    await this.save();
     if (this.index + 1 < this.images.length) this.load(this.index + 1);
     else { this.flash('All photos saved.'); this.refresh(); }
   }
 
   async saveAll() {
     this.commitEntry();
-    for (const im of this.images) if (im.labels.length) await this.download(im);
+    for (const im of this.images) if (im.labels.length) await this.save(im);
     this.trim();
     this.refresh();
   }
@@ -619,7 +833,8 @@ export class Labeler {
     this.countEl.textContent = im ? `${this.index + 1}/${this.images.length}` : '0/0';
     if (!im) { this.statusEl.textContent = extra || 'Open some photos to start. Photos stay on your device.'; return; }
     const sel = this.selected !== null && im.labels[this.selected] ? `  ·  selected: "${im.labels[this.selected].text}"` : '';
-    const base = `${im.name}${im.dirty ? ' *' : ''}  ·  labels: ${im.labels.length}${sel}  ·  text ${s.fontPct}%  square ${s.markerPct}%  colour ${s.fill}  ·  saves as ${s.format.toUpperCase()}`;
+    const where = FS_ACCESS && s.saveTo === 'folder' && im.dir ? ' into its folder' : ' to Downloads';
+    const base = `${im.name}${im.dirty ? ' *' : ''}  ·  labels: ${im.labels.length}${sel}  ·  text ${s.fontPct}%  square ${s.markerPct}%  colour ${s.fill}  ·  saves as ${s.format.toUpperCase()}${where}`;
     this.statusEl.textContent = extra ? `${extra}   |   ${base}` : base;
     this.colourInput.value = s.fill;
   }
@@ -791,7 +1006,7 @@ export class Labeler {
       '+': () => this.adjustFont(0.25), '=': () => this.adjustFont(0.25), '-': () => this.adjustFont(-0.25), '_': () => this.adjustFont(-0.25),
       '[': () => this.adjustMarker(-0.25), ']': () => this.adjustMarker(0.25),
       c: () => this.cycleColour(), k: () => this.colourInput.click(),
-      o: () => this.fileInput.click(), f: () => this.folderInput.click(), '?': () => this.action('help'),
+      o: () => this.openPhotos(), f: () => this.openFolder(), '?': () => this.action('help'),
     };
     if (e.ctrlKey && !['z', 'y'].includes(k)) return;
     if (acts[k]) { e.preventDefault(); acts[k](); }

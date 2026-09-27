@@ -18,7 +18,7 @@
     window.addEventListener('unhandledrejection', (e) => { document.getElementById('results').textContent = 'FAIL unhandled rejection: ' + (e.reason && e.reason.stack || e.reason) + '\n\nFAILURES: 1'; document.title = 'DONE'; });
   </script>
   <script type="module">
-    import { Labeler, drawLabels, outlineFor, COLOURS, isImageFile, isHeic } from '../docs/app.js';
+    import { Labeler, drawLabels, outlineFor, COLOURS, isImageFile, isHeic, FS_ACCESS } from '../docs/app.js';
 
     const out = [];
     let fails = 0;
@@ -51,8 +51,9 @@
 
     try {
       localStorage.clear();
-      const app = new Labeler(document.getElementById('app'));
+      const app = new Labeler(document.getElementById('app'), { resume: false });
       window.app = app;
+      await app.clearSession();
       const f1 = await toFile(makeBoard(4000, 3000), 'IMG_0001.jpg', 'image/jpeg');
       const f2 = await toFile(makeBoard(1200, 800), 'IMG_0002.png', 'image/png');
       const f3 = await toFile(makeBoard(800, 600), 'IMG_0001_labeled.jpg', 'image/jpeg');
@@ -244,14 +245,14 @@
       key('n'); check(app.current.labels[0].text === '220 Ω', 'image 2 labels kept');
       key('n'); check(app.index === 1 && app.statusEl.textContent.includes('No more'), 'N past the end flashes');
       // re-open the same file in a fresh instance: labels restored from storage
-      const app2 = new Labeler(document.createElement('div'));
+      const app2 = new Labeler(document.createElement('div'), { resume: false });
       document.body.appendChild(app2.container);
       await app2.openFiles([f1]); await tick();
       check(app2.current.labels.length === 6 && app2.current.labels[2].text === 'VCC 5V', 'reopening a photo restores its labels');
       check(app2.style.markerPct === 2.5 && app2.style.fontPct === 3.25, 'style restored in a fresh instance');
       app2.container.remove();
       // a "folder" pick: files carry webkitRelativePath; sorted naturally, outputs and non-images dropped
-      const app3 = new Labeler(document.createElement('div'));
+      const app3 = new Labeler(document.createElement('div'), { resume: false });
       document.body.appendChild(app3.container);
       const mk = async (name, rel) => { const f = await toFile(makeBoard(300, 200), name, 'image/png'); Object.defineProperty(f, 'webkitRelativePath', { value: rel }); return f; };
       await app3.openFiles([await mk('b10.png', 'lab/b10.png'), await mk('b2.png', 'lab/b2.png'), await mk('a_labeled.png', 'lab/a_labeled.png'), await mk('a.png', 'lab/a.png')]);
@@ -266,7 +267,7 @@
       const heicFile = new File([heicBlob], 'IMG_0003.heic', { type: '', lastModified: 1700000000001 });   // Windows often reports no type
       check(isImageFile(heicFile) && isHeic(heicFile), 'heic recognised by extension even with an empty MIME type');
       check(!isImageFile(new File(['x'], 'IMG_0003_labeled_2.heic')), 'numbered outputs are skipped');
-      const app4 = new Labeler(document.createElement('div'));
+      const app4 = new Labeler(document.createElement('div'), { resume: false });
       document.body.appendChild(app4.container);
       await app4.openFiles([heicFile]); await tick();
       check(app4.images.length === 1 && app4.current.width === 640 && app4.current.height === 480,
@@ -297,7 +298,7 @@
       app4.container.remove();
 
       // ---- memory: decode on demand, keep only current +/- 1 -------------------
-      const app5 = new Labeler(document.createElement('div'));
+      const app5 = new Labeler(document.createElement('div'), { resume: false });
       document.body.appendChild(app5.container);
       const many = [];
       for (let i = 0; i < 5; i++) many.push(await toFile(makeBoard(300, 200), `m${i}.png`, 'image/png'));
@@ -332,6 +333,59 @@
 
       // screenshot state for a visual check
       app.load(0); app.selected = 0; app.refresh();
+      // ---- File System Access: folder handles, save in place, session restore --
+      if (FS_ACCESS && navigator.storage && navigator.storage.getDirectory) {
+        const root = await navigator.storage.getDirectory();           // OPFS handles are real FileSystemHandles
+        try { await root.removeEntry('lab-week3', { recursive: true }); } catch {}
+        const dir = await root.getDirectoryHandle('lab-week3', { create: true });
+        const put = async (d, name, w, h) => {
+          const fh = await d.getFileHandle(name, { create: true }); const ws = await fh.createWritable();
+          ws.write(await new Promise((r) => makeBoard(w, h).toBlob(r, 'image/png'))); await ws.close();
+        };
+        await put(dir, 'IMG_0010.png', 400, 300); await put(dir, 'IMG_0002.png', 400, 300); await put(dir, 'IMG_0002_labeled.png', 20, 20);
+        const sub = await dir.getDirectoryHandle('day2', { create: true }); await put(sub, 'IMG_0020.png', 400, 300);
+        const names = async (d) => { const o = []; for await (const [n] of d.entries()) o.push(n); return o.sort(); };
+        const sizeOf = async (d, n) => (await (await d.getFileHandle(n)).getFile()).size;
+        const origSize = await sizeOf(dir, 'IMG_0002.png');
+
+        const app6 = new Labeler(document.createElement('div'), { resume: false });
+        document.body.appendChild(app6.container);
+        await app6.openDirectoryHandle(dir);
+        check(app6.images.map((i) => i.name).join() === 'IMG_0002.png,IMG_0010.png,IMG_0020.png',
+          `folder handle lists originals in natural order, recursively, skipping outputs: ${app6.images.map((i) => i.name)}`);
+        check(app6.images.every((i) => i.dir === dir && i.handle && i.path), 'entries carry folder and file handles');
+        check(app6.statusEl.textContent.includes('into its folder'), 'status says saves go into the folder');
+        app6.current.labels.push({ x: 200, y: 100, text: 'C1', tip: [120, 160], fill: '#FFEB3B', marker: 2.5 });
+        check(await app6.save(), 'save writes into the folder');
+        check((await names(dir)).includes('IMG_0002_labeled.jpg'), `labelled copy appears next to the original: ${await names(dir)}`);
+        const outFile = await (await dir.getFileHandle('IMG_0002_labeled.jpg')).getFile();
+        const head = new Uint8Array(await outFile.slice(0, 2).arrayBuffer());
+        check(head[0] === 0xFF && head[1] === 0xD8 && outFile.size > 1000, `saved file is a real JPEG (${outFile.size} bytes)`);
+        check(await app6.save() && (await names(dir)).includes('IMG_0002_labeled_2.jpg'), 'a second save makes _labeled_2 instead of overwriting');
+        check((await sizeOf(dir, 'IMG_0002.png')) === origSize, 'the original is untouched');
+        await app6.load(2);
+        check(await app6.save() && (await names(sub)).includes('IMG_0020_labeled.jpg'), `a photo from a subfolder is saved in that subfolder: ${await names(sub)}`);
+        app6.setSaveTo('download');
+        check(app6.statusEl.textContent.includes('to Downloads') && JSON.parse(localStorage.getItem('bbl.style')).saveTo === 'download', 'save target switch is shown and persisted');
+        app6.setSaveTo('folder');
+
+        // session restore into a fresh instance (permission on OPFS handles is already granted)
+        const app7 = new Labeler(document.createElement('div'), { resume: false });
+        document.body.appendChild(app7.container);
+        check(await app7.restoreSession({ interactive: false }), 'session restores without prompting when permission is still granted');
+        check(app7.images.length === 3 && app7.index === 2 && app7.current.name === 'IMG_0020.png', `restored queue and position: ${app7.images.length} photos, at ${app7.index}`);
+        check(app7.images[0].labels.length === 1 && app7.images[0].labels[0].text === 'C1', 'labels come back with the restored photos');
+        check(app7.images.every((i) => i.dir && i.handle), 'restored entries can save into the folder again');
+        // the automatic path used at startup
+        const app8 = new Labeler(document.createElement('div'));
+        document.body.appendChild(app8.container);
+        await tick(400);
+        check(app8.images.length === 3 && app8.index === 2, `startup auto-restore: ${app8.images.length} photos at ${app8.index}`);
+        check(app8.resumeBtn.hidden, 'no resume button needed after auto-restore');
+        await app8.clearSession();
+        app6.container.remove(); app7.container.remove(); app8.container.remove();
+        await root.removeEntry('lab-week3', { recursive: true });
+      } else out.push('INFO File System Access API not available here; folder/session tests skipped');
     } catch (err) {
       check(false, `exception: ${err && err.stack || err}`);
     }

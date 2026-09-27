@@ -56,9 +56,19 @@ body {
   border: 2px solid #000; border-radius: 6px; padding: 2px 8px; outline: none;
 }
 .bbl-drop {
-  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  position: absolute; inset: 0; display: flex; flex-direction: column; gap: 16px; align-items: center; justify-content: center;
   color: var(--muted); font-size: 18px; pointer-events: none; text-align: center; padding: 16px;
 }
+.bbl-resume {
+  pointer-events: auto; background: var(--accent); color: var(--accent-text); border: 0; border-radius: 8px;
+  padding: 10px 18px; font: inherit; font-weight: 600; cursor: pointer;
+}
+.bbl-resume[hidden] { display: none; }
+.bbl-saveto {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 8px; font: inherit; cursor: pointer;
+}
+.bbl-saveto[hidden] { display: none; }
 .bbl-drop[hidden] { display: none; }
 .bbl-stage.bbl-over { outline: 3px dashed var(--accent); outline-offset: -6px; }
 .bbl-help {
