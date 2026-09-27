@@ -160,17 +160,23 @@
       check(texts().join() === 'R1 10k,LED (red),VCC,GND wire', `Delete removes the selected label: ${texts()}`);
       key('z'); check(texts().length === 5 && texts()[2] === '555 timer', 'Z restores it');
       key('y');
-      click(0.52, 0.605); type('555 timer');
+      click(0.56, 0.57); type('555 timer');          // on the chip, clear of the GND wire text box
       c.dispatchEvent(new MouseEvent('dblclick', { clientX: rect().left + labelDisp(2)[0], clientY: rect().top + labelDisp(2)[1], bubbles: true }));
       check(!!app.entry && app.entryEl.value === 'VCC' && app.entry.editing === 2, 'double-click edits the text');
       type('VCC 5V');
       check(texts()[2] === 'VCC 5V' && texts().length === 5, `edit replaces text: ${texts()}`);
       key('Escape');                                   // editing keeps the label selected
-      key('c'); key('c'); key('c'); click(0.75, 0.75); type('black label');
+      for (let i = 0; i < COLOURS.length && app.style.fill !== '#000000'; i++) key('c');
+      click(0.75, 0.75); type('black label');
       check(app.current.labels[5].fill === '#000000' && app.current.labels[0].fill === '#FF00FF', `new label takes current colour, old keep theirs (${app.current.labels[5].fill})`);
-      key('c'); key('c'); key('c'); key('c');
+      check(app.style.fill === COLOURS[COLOURS.length - 1], 'black is the last built-in preset');
+      key('c');
       check(app.style.fill === COLOURS[0], `colour cycle wraps: ${app.style.fill}`);
-      check(COLOURS[1] === '#FF9800' && !!app.swatchesEl.querySelector('[data-colour="#FF9800"]'), 'orange preset exists');
+      for (const [name, col] of [['orange', '#FF9800'], ['dark blue', '#2962FF'], ['pink', '#FF66CC'], ['brown', '#8D5524'], ['light grey', '#D3D3D3']])
+        check(COLOURS.includes(col) && !!app.swatchesEl.querySelector(`[data-colour="${col}"]`), `${name} preset exists`);
+      check(!COLOURS.includes('#00E5FF') && !app.swatchesEl.querySelector('[data-colour="#00E5FF"]'), 'cyan preset removed');
+      check(outlineFor('#2962FF') === '#FFFFFF' && outlineFor('#8D5524') === '#FFFFFF' && outlineFor('#D3D3D3') === '#000000' && outlineFor('#FF66CC') === '#000000',
+        'text colour on the new presets: white on blue and brown, black on grey and pink');
 
       // ---- custom presets ----------------------------------------------------
       check(app.addPreset('#8E24AA') && app.custom.includes('#8E24AA'), 'custom preset added');
@@ -195,10 +201,10 @@
       type('orange one');
       check(app.current.labels.at(-1).fill === '#FF9800' && app.current.labels.at(-1).text === 'orange one', 'the placed label keeps that colour');
       c.dispatchEvent(new MouseEvent('dblclick', { clientX: rect().left + labelDisp(0)[0], clientY: rect().top + labelDisp(0)[1], bubbles: true }));
-      app.swatchesEl.querySelector('[data-colour="#00E5FF"]').click();
-      check(!!app.entry && app.current.labels[0].fill === '#00E5FF' && app.entry.fill === '#00E5FF', 'while editing, a swatch recolours that label immediately');
+      app.swatchesEl.querySelector('[data-colour="#2962FF"]').click();
+      check(!!app.entry && app.current.labels[0].fill === '#2962FF' && app.entry.fill === '#2962FF', 'while editing, a swatch recolours that label immediately');
       app.entryEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); key('Escape');
-      check(app.current.labels[0].fill === '#00E5FF', 'the recolour survives cancelling the edit');
+      check(app.current.labels[0].fill === '#2962FF', 'the recolour survives cancelling the edit');
       key('z'); check(app.current.labels[0].fill === '#FF00FF', 'and Z undoes it');
       key('z'); check(app.current.labels.length === 6, 'Z removes the orange test label');
       app.applyColour(COLOURS[0]);

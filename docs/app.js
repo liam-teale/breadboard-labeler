@@ -4,7 +4,10 @@
 // never leave the device, and the original files are never modified: saving
 // always downloads a new *_labeled copy.
 
-export const COLOURS = ['#FFEB3B', '#FF9800', '#FFFFFF', '#000000', '#FF3B30', '#00E5FF', '#76FF03'];
+// Presets follow the Analog Discovery (WaveForms) channel colours the group uses:
+// yellow, orange, blue, pink, green, brown, then red, white, light grey, black.
+export const COLOURS = ['#FFEB3B', '#FF9800', '#2962FF', '#FF66CC', '#76FF03', '#8D5524',
+  '#FF3B30', '#FFFFFF', '#D3D3D3', '#000000'];
 const STYLE_KEY = 'bbl.style';
 const PRESETS_KEY = 'bbl.customColours';
 // HEIC/HEIF (iPhone photos) are decoded with heic-to (libheif 1.22, handles the

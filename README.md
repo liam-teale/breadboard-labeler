@@ -41,7 +41,7 @@ restores them. Undo, redo, text size, square size and colour are all in the tool
 | Delete | delete the selected label |
 | + / - | bigger / smaller text |
 | [ / ] | smaller / bigger square |
-| C | cycle preset colours: yellow, orange, white, black, red, cyan, green, then your own |
+| C | cycle preset colours: yellow, orange, blue, pink, green, brown, red, white, light grey, black, then your own |
 | K | pick any colour |
 | + (toolbar) | save the current colour as a preset; right-click a custom preset to remove it |
 | Shift-click | text-only label, no square (the "Text only" button does the same on touch screens) |
