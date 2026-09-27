@@ -6,6 +6,19 @@
 
 export const COLOURS = ['#FFEB3B', '#FFFFFF', '#000000', '#FF3B30', '#00E5FF', '#76FF03'];
 const STYLE_KEY = 'bbl.style';
+// HEIC/HEIF (iPhone photos) are decoded with libheif compiled to WebAssembly,
+// fetched only the first time such a file is opened.
+const HEIC_DECODER_URL = 'https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js';
+const IMAGE_NAME = /\.(jpe?g|png|webp|gif|bmp|avif|tiff?|heic|heif)$/i;
+const HEIC_NAME = /\.hei[cf]$/i;
+const OUTPUT_NAME = /_labeled(_\d+)?\.[^.]+$/i;
+
+export function isHeic(file) {
+  return /^image\/hei[cf]$/i.test(file.type) || HEIC_NAME.test(file.name);
+}
+export function isImageFile(file) {
+  return (file.type.startsWith('image/') || IMAGE_NAME.test(file.name)) && !OUTPUT_NAME.test(file.name);
+}
 const LABELS_KEY = 'bbl.labels';
 const DRAG_THRESHOLD = 6;
 
@@ -116,7 +129,8 @@ export class Labeler {
     this.container = container;
     this.images = [];          // {name, type, key, bitmap, width, height, labels, undo, redo, dirty}
     this.index = -1;
-    this.style = Object.assign({ fontPct: 3, markerPct: 2.5, fill: COLOURS[0] }, loadJSON(STYLE_KEY, {}));
+    this.style = Object.assign({ fontPct: 3, markerPct: 2.5, fill: COLOURS[0], format: 'jpg' }, loadJSON(STYLE_KEY, {}));
+    if (!['jpg', 'png'].includes(this.style.format)) this.style.format = 'jpg';
     this.saved = loadJSON(LABELS_KEY, {});
     this.selected = null;
     this.textOnly = false;
@@ -135,13 +149,16 @@ export class Labeler {
     c.classList.add('bbl');
     c.innerHTML = `
       <div class="bbl-toolbar">
-        <label class="bbl-btn bbl-primary">Open photos<input type="file" accept="image/*" multiple hidden></label>
+        <label class="bbl-btn bbl-primary">Open photos<input type="file" accept="image/*,.heic,.heif" multiple hidden></label>
         <label class="bbl-btn bbl-folder">Open folder<input type="file" class="bbl-folder-input" webkitdirectory multiple hidden></label>
         <button data-act="prev" title="Previous (P)">&#9664;</button>
         <span class="bbl-count"></span>
         <button data-act="next" title="Next (N)">&#9654;</button>
         <button data-act="save" class="bbl-primary" title="Save this photo and go to the next (S)">Save</button>
         <button data-act="saveAll" title="Download every photo that has labels">Save all</button>
+        <select class="bbl-format" title="Output format for every save, whatever the input was">
+          <option value="jpg">as JPG</option><option value="png">as PNG</option>
+        </select>
         <span class="bbl-sep"></span>
         <button data-act="undo" title="Undo (Z)">&#8630;</button>
         <button data-act="redo" title="Redo (Y)">&#8631;</button>
@@ -175,6 +192,8 @@ export class Labeler {
     this.helpEl = c.querySelector('.bbl-help');
     this.colourInput = c.querySelector('.bbl-colour');
     this.textOnlyBtn = c.querySelector('[data-act=textOnly]');
+    this.formatSelect = c.querySelector('.bbl-format');
+    this.formatSelect.value = this.style.format;
     const sw = c.querySelector('.bbl-swatches');
     for (const col of COLOURS) {
       const b = document.createElement('button');
@@ -193,6 +212,7 @@ export class Labeler {
       const act = b.dataset.act; if (act) this.action(act);
     });
     this.colourInput.addEventListener('input', () => this.applyColour(this.colourInput.value.toUpperCase()));
+    this.formatSelect.addEventListener('change', () => this.setFormat(this.formatSelect.value));
     const cv = this.canvas;
     cv.addEventListener('pointerdown', (e) => this.onPress(e));
     cv.addEventListener('pointermove', (e) => this.onDrag(e));
@@ -232,14 +252,23 @@ export class Labeler {
   async openFiles(files) {
     // A folder pick includes everything inside it; keep only images and skip earlier outputs.
     const list = Array.from(files || [])
-      .filter((f) => f.type.startsWith('image/') && !/_labeled(_\d+)?\.[^.]+$/i.test(f.name))
+      .filter(isImageFile)
       .sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name, undefined, { numeric: true }));
     if (!list.length) { this.flash('No photos found there.'); return; }
     const firstNew = this.images.length;
+    const failed = [];
     for (const f of list) {
       const key = `${f.name}|${f.size}|${f.lastModified}`;
       if (this.images.some((im) => im.key === key)) continue;
-      const bitmap = await this.decode(f);
+      let bitmap;
+      try {
+        if (isHeic(f)) this.status(`Decoding ${f.name}...`);
+        bitmap = await this.decode(f);
+      } catch (err) {
+        console.warn('could not open', f.name, err);
+        failed.push(f.name);
+        continue;
+      }
       const stored = this.saved[key];
       this.images.push({
         name: f.name, type: f.type, key, bitmap, width: bitmap.width, height: bitmap.height,
@@ -247,22 +276,56 @@ export class Labeler {
       });
     }
     if (this.index < 0 && this.images.length) this.load(0);
-    else if (this.images.length > firstNew) this.flash(`Added ${this.images.length - firstNew} photo(s); ${this.images.length} in the queue.`);
-    this.refresh();
+    this.refresh();                      // redraw first: flash() must be the last thing to touch the status line
+    const notes = [];
+    if (this.images.length > firstNew && firstNew > 0) notes.push(`Added ${this.images.length - firstNew} photo(s); ${this.images.length} in the queue.`);
+    if (failed.length) notes.push(`Could not open: ${failed.join(', ')}`);
+    if (notes.length) this.flash(notes.join('   '));
   }
 
   async decode(file) {
+    let blob = file;
+    if (isHeic(file)) {
+      let converted = null;
+      try { converted = await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch { /* browser cannot decode HEIC natively */ }
+      if (converted) return converted;
+      await this.loadHeicDecoder();
+      const out = await window.heic2any({ blob: file, toType: 'image/png' });
+      blob = Array.isArray(out) ? out[0] : out;
+    }
     try {
-      return await createImageBitmap(file, { imageOrientation: 'from-image' });
+      return await createImageBitmap(blob, { imageOrientation: 'from-image' });
     } catch {
       return new Promise((resolve, reject) => {
-        const url = URL.createObjectURL(file);
+        const url = URL.createObjectURL(blob);
         const img = new Image();
         img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
-        img.onerror = reject;
+        img.onerror = () => reject(new Error('undecodable image'));
         img.src = url;
       });
     }
+  }
+
+  loadHeicDecoder() {
+    if (window.heic2any) return Promise.resolve();
+    if (!this._heicLoading) {
+      this.status('Loading HEIC decoder (one-time download)...');
+      this._heicLoading = new Promise((resolve, reject) => {
+        const sc = document.createElement('script');
+        sc.src = HEIC_DECODER_URL;
+        sc.onload = () => resolve();
+        sc.onerror = () => { this._heicLoading = null; reject(new Error('HEIC decoder failed to load')); };
+        document.head.appendChild(sc);
+      });
+    }
+    return this._heicLoading;
+  }
+
+  setFormat(fmt) {
+    this.style.format = fmt === 'png' ? 'png' : 'jpg';
+    this.formatSelect.value = this.style.format;
+    saveJSON(STYLE_KEY, this.style);
+    this.refresh();
   }
 
   load(i) {
@@ -278,11 +341,12 @@ export class Labeler {
     else this.flash(d > 0 ? 'No more photos that way.' : 'This is the first photo.');
   }
 
+  /** Output is always the chosen format (JPG or PNG), whatever the input was. */
   outputName(im) {
     const dot = im.name.lastIndexOf('.');
     const stem = dot > 0 ? im.name.slice(0, dot) : im.name;
-    const jpeg = im.type === 'image/jpeg';
-    return { name: `${stem}_labeled.${jpeg ? 'jpg' : 'png'}`, mime: jpeg ? 'image/jpeg' : 'image/png' };
+    const png = this.style.format === 'png';
+    return { name: `${stem}_labeled.${png ? 'png' : 'jpg'}`, mime: png ? 'image/png' : 'image/jpeg' };
   }
 
   /** Full-resolution render of one image. */
@@ -435,7 +499,7 @@ export class Labeler {
     this.countEl.textContent = im ? `${this.index + 1}/${this.images.length}` : '0/0';
     if (!im) { this.statusEl.textContent = extra || 'Open some photos to start. Photos stay on your device.'; return; }
     const sel = this.selected !== null && im.labels[this.selected] ? `  ·  selected: "${im.labels[this.selected].text}"` : '';
-    const base = `${im.name}${im.dirty ? ' *' : ''}  ·  labels: ${im.labels.length}${sel}  ·  text ${s.fontPct}%  square ${s.markerPct}%  colour ${s.fill}`;
+    const base = `${im.name}${im.dirty ? ' *' : ''}  ·  labels: ${im.labels.length}${sel}  ·  text ${s.fontPct}%  square ${s.markerPct}%  colour ${s.fill}  ·  saves as ${s.format.toUpperCase()}`;
     this.statusEl.textContent = extra ? `${extra}   |   ${base}` : base;
     this.colourInput.value = s.fill;
   }

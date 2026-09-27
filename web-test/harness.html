@@ -18,7 +18,7 @@
     window.addEventListener('unhandledrejection', (e) => { document.getElementById('results').textContent = 'FAIL unhandled rejection: ' + (e.reason && e.reason.stack || e.reason) + '\n\nFAILURES: 1'; document.title = 'DONE'; });
   </script>
   <script type="module">
-    import { Labeler, drawLabels, outlineFor, COLOURS } from '../docs/app.js';
+    import { Labeler, drawLabels, outlineFor, COLOURS, isImageFile, isHeic } from '../docs/app.js';
 
     const out = [];
     let fails = 0;
@@ -182,8 +182,14 @@
       check(px(full, b0[0] + 8, (b0[1] + b0[3]) / 2) === '#FF00FF', 'text box is solid fill colour');
       const blob = await app.saveBlob();
       check(blob && blob.type === 'image/jpeg' && blob.size > 50000, `saveBlob makes a jpeg (${blob.size} bytes)`);
-      check(app.outputName(app.current).name === 'IMG_0001_labeled.jpg', 'output name');
-      check(app.outputName(app.images[1]).name === 'IMG_0002_labeled.png', 'png output name');
+      check(app.style.format === 'jpg' && app.outputName(app.current).name === 'IMG_0001_labeled.jpg', 'default output is JPG');
+      check(app.outputName(app.images[1]).name === 'IMG_0002_labeled.jpg', 'PNG input still saves as JPG');
+      app.setFormat('png');
+      check(app.outputName(app.images[1]).name === 'IMG_0002_labeled.png' && app.formatSelect.value === 'png', 'format switch to PNG');
+      const pngBlob = await app.saveBlob(app.images[0]);
+      check(pngBlob.type === 'image/png', 'JPG input saves as PNG when chosen');
+      check(JSON.parse(localStorage.getItem('bbl.style')).format === 'png', 'format persisted');
+      app.setFormat('jpg');
 
       // ---- persistence and navigation ---------------------------------------
       const stored = JSON.parse(localStorage.getItem('bbl.labels'));
@@ -212,6 +218,24 @@
       app3.container.remove();
       const f1bytes = await f1.arrayBuffer();
       check(f1bytes.byteLength === f1.size, 'original File object is untouched');
+
+      // ---- HEIC via the lazily loaded decoder ---------------------------------
+      const heicBlob = await (await fetch('./sample.heic')).blob();
+      const heicFile = new File([heicBlob], 'IMG_0003.heic', { type: '', lastModified: 1700000000001 });   // Windows often reports no type
+      check(isImageFile(heicFile) && isHeic(heicFile), 'heic recognised by extension even with an empty MIME type');
+      check(!isImageFile(new File(['x'], 'IMG_0003_labeled_2.heic')), 'numbered outputs are skipped');
+      const app4 = new Labeler(document.createElement('div'));
+      document.body.appendChild(app4.container);
+      await app4.openFiles([heicFile]); await tick();
+      check(app4.images.length === 1 && app4.current.width === 640 && app4.current.height === 480,
+        `HEIC decoded: ${app4.images.length ? app4.current.width + 'x' + app4.current.height : app4.statusEl.textContent}`);
+      check(app4.outputName(app4.current).name === 'IMG_0003_labeled.jpg', 'HEIC saves as JPG');
+      const heicOut = await app4.saveBlob();
+      check(heicOut && heicOut.type === 'image/jpeg' && heicOut.size > 1000, `HEIC output blob is a jpeg (${heicOut && heicOut.size} bytes)`);
+      const bad = new File([new Uint8Array([1, 2, 3, 4])], 'broken.heic', { type: 'image/heic' });
+      await app4.openFiles([bad]); await tick();
+      check(app4.images.length === 1 && app4.statusEl.textContent.includes('Could not open'), 'a broken file is reported, not fatal');
+      app4.container.remove();
 
       // screenshot state for a visual check
       app.load(0); app.selected = 0; app.refresh();

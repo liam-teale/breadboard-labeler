@@ -1,5 +1,5 @@
 // Offline support: network first so updates arrive promptly, cache as a fallback.
-const CACHE = 'bbl-v1';
+const CACHE = 'bbl-v2';
 const SHELL = ['./', './index.html', './app.js', './style.css', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png'];
 
@@ -14,7 +14,16 @@ self.addEventListener('activate', (e) => {
 });
 
 self.addEventListener('fetch', (e) => {
-  if (e.request.method !== 'GET' || !e.request.url.startsWith(self.location.origin)) return;
+  if (e.request.method !== 'GET') return;
+  if (e.request.url.startsWith('https://cdn.jsdelivr.net/')) {
+    // versioned decoder: cache first so HEIC keeps working offline after the first use
+    e.respondWith(caches.match(e.request).then((r) => r || fetch(e.request).then((res) => {
+      caches.open(CACHE).then((c) => c.put(e.request, res.clone()));
+      return res;
+    })));
+    return;
+  }
+  if (!e.request.url.startsWith(self.location.origin)) return;
   e.respondWith(
     fetch(e.request).then((res) => {
       if (res.ok) caches.open(CACHE).then((c) => c.put(e.request, res.clone()));
