@@ -6,9 +6,10 @@
 
 export const COLOURS = ['#FFEB3B', '#FFFFFF', '#000000', '#FF3B30', '#00E5FF', '#76FF03'];
 const STYLE_KEY = 'bbl.style';
-// HEIC/HEIF (iPhone photos) are decoded with libheif compiled to WebAssembly,
-// fetched only the first time such a file is opened.
-const HEIC_DECODER_URL = 'https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js';
+// HEIC/HEIF (iPhone photos) are decoded with heic-to (libheif 1.22, handles the
+// 10-bit HDR files newer iPhones produce), fetched only the first time such a
+// file is opened. The "csp" build avoids eval so it also runs under a strict CSP.
+const HEIC_DECODER_URL = 'https://cdn.jsdelivr.net/npm/heic-to@1.5.2/dist/csp/heic-to.min.js';
 const IMAGE_NAME = /\.(jpe?g|png|webp|gif|bmp|avif|tiff?|heic|heif)$/i;
 const HEIC_NAME = /\.hei[cf]$/i;
 const OUTPUT_NAME = /_labeled(_\d+)?\.[^.]+$/i;
@@ -289,9 +290,8 @@ export class Labeler {
       let converted = null;
       try { converted = await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch { /* browser cannot decode HEIC natively */ }
       if (converted) return converted;
-      await this.loadHeicDecoder();
-      const out = await window.heic2any({ blob: file, toType: 'image/png' });
-      blob = Array.isArray(out) ? out[0] : out;
+      const { heicTo } = await this.loadHeicDecoder();
+      blob = await heicTo({ blob: file, type: 'image/png' });
     }
     try {
       return await createImageBitmap(blob, { imageOrientation: 'from-image' });
@@ -307,18 +307,14 @@ export class Labeler {
   }
 
   loadHeicDecoder() {
-    if (window.heic2any) return Promise.resolve();
-    if (!this._heicLoading) {
+    if (!Labeler._heicModule) {
       this.status('Loading HEIC decoder (one-time download)...');
-      this._heicLoading = new Promise((resolve, reject) => {
-        const sc = document.createElement('script');
-        sc.src = HEIC_DECODER_URL;
-        sc.onload = () => resolve();
-        sc.onerror = () => { this._heicLoading = null; reject(new Error('HEIC decoder failed to load')); };
-        document.head.appendChild(sc);
+      Labeler._heicModule = import(HEIC_DECODER_URL).catch((err) => {
+        Labeler._heicModule = null;
+        throw new Error(`HEIC decoder failed to load: ${err.message}`);
       });
     }
-    return this._heicLoading;
+    return Labeler._heicModule;
   }
 
   setFormat(fmt) {

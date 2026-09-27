@@ -59,8 +59,9 @@ you can chain click, type, click, type without pressing Enter.
 - Text height defaults to 3% of the image width, so labels look the same size on a 12 MP phone
   photo and a 1200 px screenshot. Output is full resolution.
 - Photos with EXIF rotation are shown and saved upright.
-- HEIC files are decoded in the browser with libheif (WebAssembly), downloaded the first time
-  one is opened (about 1.3 MB) and cached for offline use after that.
+- HEIC files are decoded in the browser with [heic-to](https://github.com/hoppergee/heic-to)
+  (libheif 1.22, including the 10-bit HDR files newer iPhones shoot), downloaded the first time one
+  is opened (about 3 MB) and cached for offline use after that.
 - Files whose names end in `_labeled`, `_labeled_2`, ... are treated as earlier outputs and skipped.
 
 ## Development

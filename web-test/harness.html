@@ -232,9 +232,26 @@
       check(app4.outputName(app4.current).name === 'IMG_0003_labeled.jpg', 'HEIC saves as JPG');
       const heicOut = await app4.saveBlob();
       check(heicOut && heicOut.type === 'image/jpeg' && heicOut.size > 1000, `HEIC output blob is a jpeg (${heicOut && heicOut.size} bytes)`);
+      // 10-bit HEIC (what iPhone 15+ shoots by default)
+      const heic10 = new File([await (await fetch('./sample10.heic')).blob()], 'IMG_0004.heic', { type: 'image/heic', lastModified: 1700000000002 });
+      await app4.openFiles([heic10]); await tick();
+      check(app4.images.length === 2 && app4.images[1].width === 640, `10-bit HEIC decoded: ${app4.images.length === 2 ? app4.images[1].width + 'x' + app4.images[1].height : app4.statusEl.textContent}`);
+      if (app4.images.length === 2) {
+        app4.load(1);
+        const cv10 = app4.renderFull();
+        const p10 = px(cv10, 340, 240);
+        check(p10.startsWith('#F') && p10.slice(3, 5) < '40', `10-bit red region decoded with plausible colour: ${p10}`);
+      }
+      // does the decoder choice matter? try the old one on the same file, report only
+      try {
+        await new Promise((res, rej) => { const sc = document.createElement('script'); sc.src = 'https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js'; sc.onload = res; sc.onerror = rej; document.head.appendChild(sc); });
+        let oldOk = false, oldErr = '';
+        try { const o = await window.heic2any({ blob: heic10, toType: 'image/png' }); oldOk = !!(Array.isArray(o) ? o[0] : o).size; } catch (e) { oldErr = (e && (e.message || e.code)) || JSON.stringify(e); }
+        out.push(`INFO old decoder (heic2any 0.0.4) on the 10-bit file: ${oldOk ? 'decoded fine' : 'FAILED: ' + oldErr}`);
+      } catch { out.push('INFO old decoder could not be loaded for comparison'); }
       const bad = new File([new Uint8Array([1, 2, 3, 4])], 'broken.heic', { type: 'image/heic' });
       await app4.openFiles([bad]); await tick();
-      check(app4.images.length === 1 && app4.statusEl.textContent.includes('Could not open'), 'a broken file is reported, not fatal');
+      check(app4.images.length === 2 && app4.statusEl.textContent.includes('Could not open'), `a broken file is reported, not fatal (images=${app4.images.length}, status="${app4.statusEl.textContent}")`);
       app4.container.remove();
 
       // screenshot state for a visual check

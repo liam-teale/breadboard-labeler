@@ -1,5 +1,5 @@
 // Offline support: network first so updates arrive promptly, cache as a fallback.
-const CACHE = 'bbl-v2';
+const CACHE = 'bbl-v3';
 const SHELL = ['./', './index.html', './app.js', './style.css', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png'];
 
