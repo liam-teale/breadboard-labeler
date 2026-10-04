@@ -21,9 +21,8 @@ it works offline.
    Or **drag** from the part to where the text should go.
 3. **Drag the text** or **the square** to move them. **Click a label** to select it,
    **double-click** to edit its text.
-   The **↺ / ↻** buttons (or R / Shift-R) **rotate the photo** in 90° steps; the saved copy comes out rotated.
-   Labels are placed in image pixels, so rotating a photo that already has labels removes them, after a warning
-   with the choice to go ahead or cancel. One Undo brings the labels and the old orientation back.
+   The **↺ / ↻** buttons (or R / Shift-R) **rotate the photo** in 90° steps. Labels turn with it and stay
+   on their parts; the saved copy comes out rotated. Undo turns it back.
 4. **Save** writes `name_labeled.jpg` and moves to the next photo. **Save all** does every
    labelled photo. The **as JPG / as PNG** dropdown picks the output format for every save,
    whatever the input was.
@@ -60,7 +59,7 @@ restores them. Undo, redo, text size, square size and colour are all in the tool
 | K | pick any colour |
 | + (toolbar) | save the current colour as a preset; right-click a custom preset to remove it |
 | Shift-click | text-only label, no square (the "Text only" button does the same on touch screens) |
-| R / Shift-R | rotate the photo right / left by 90° (removes its labels, after a warning; Z undoes it) |
+| R / Shift-R | rotate the photo right / left by 90° (labels turn with it) |
 | ? | show this list in the app |
 
 **Colours and square size:** with a label selected (click its text), C, K, [ and ] change that one

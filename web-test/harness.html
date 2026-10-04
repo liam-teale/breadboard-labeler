@@ -331,7 +331,7 @@
         key('z');
       }
 
-      // ---- rotation: 90-degree steps, labels removed after a warning, one Z undoes both -----
+      // ---- rotation: 90-degree steps; labels turn with the photo; one Z undoes both -------
       {
         const appR = new Labeler(document.createElement('div'), { resume: false });
         document.body.appendChild(appR.container);
@@ -339,13 +339,11 @@
         const dR = cvR.getContext('2d'); dR.fillStyle = '#00FF00'; dR.fillRect(0, 0, 40, 40);
         const fR = await toFile(cvR, 'IMG_0050.png', 'image/png');
         await appR.openFiles([fR]); await tick();
-        const okBtn = () => appR.dialogEl.querySelector('.bbl-dialog-ok'), cancelBtn = () => appR.dialogEl.querySelector('.bbl-dialog-cancel');
         const keyR = (k, extra = {}) => document.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...extra }));
+        const at = (lb) => [lb.x, lb.y, ...(lb.tip || [])].map(Math.round).join();
         check(!!appR.container.querySelector('[data-act=rotateRight]') && !!appR.container.querySelector('[data-act=rotateLeft]'), 'rotate buttons in the toolbar');
         check(appR.current.rotation === 0 && appR.current.width === 400 && appR.current.height === 300, 'photo starts unrotated');
-        // no labels: rotates straight away, no dialog
-        const p1 = appR.rotate(90); await tick();
-        check(appR.dialogEl.hidden && (await p1) === true, 'with no labels, rotate needs no confirmation');
+        check(appR.rotate(90) === true, 'rotate reports success');
         check(appR.current.rotation === 90 && appR.current.width === 300 && appR.current.height === 400, `90°: width and height swap (${appR.current.width}x${appR.current.height})`);
         check(appR.statusEl.textContent.includes('rotated 90°') && appR.current.dirty, 'status shows the rotation and the photo is marked unsaved');
         let fullR = appR.renderFull();
@@ -355,60 +353,53 @@
         check(appR.current.rotation === 0 && appR.current.width === 400 && px(appR.renderFull(), 10, 10) === '#00FF00', 'Z undoes a rotation');
         keyR('y');
         check(appR.current.rotation === 90 && appR.current.width === 300, 'Y redoes it');
-        keyR('r', { shiftKey: true }); await tick();
+        keyR('r', { shiftKey: true });
         check(appR.current.rotation === 0, 'Shift-R rotates back the other way');
-        await appR.rotate(-90); await appR.rotate(-90);
+        appR.rotate(-90); appR.rotate(-90);
         check(appR.current.rotation === 180 && appR.current.width === 400 && px(appR.renderFull(), 390, 290) === '#00FF00', '180°: mark is bottom-right');
-        await appR.rotate(90); await appR.rotate(90);
+        appR.rotate(90); appR.rotate(90);
         check(appR.current.rotation === 0, 'wraps back to 0');
-        // with labels: a warning with two choices
-        appR.current.labels.push({ x: 200, y: 100, text: 'A', tip: [120, 160], fill: '#FFEB3B', marker: 2.5 });
-        appR.current.labels.push({ x: 250, y: 200, text: 'B', tip: null, fill: '#FFEB3B', marker: 2.5 });
-        appR.persist(); appR.refresh();
-        let pending = appR.rotate(90); await tick();
-        check(!appR.dialogEl.hidden && !!appR.dialog, 'with labels, rotate opens a confirmation first');
-        const dlgText = appR.dialogEl.querySelector('.bbl-dialog-text').textContent, dlgNote = appR.dialogEl.querySelector('.bbl-dialog-note').textContent;
-        check(/2 labels/.test(dlgText) && /delet/i.test(dlgText), `dialog says the labels will be deleted: "${dlgText}"`);
-        check(/undo/i.test(dlgNote), `dialog says it can be undone: "${dlgNote}"`);
-        check(/delete/i.test(okBtn().textContent) && /rotate/i.test(okBtn().textContent) && cancelBtn().textContent === 'Cancel', `two options: "${okBtn().textContent}" / "${cancelBtn().textContent}"`);
-        check(document.activeElement === cancelBtn(), 'Cancel has focus, so a stray Enter does nothing destructive');
+        // labels: the square stays on its part and the text keeps its place relative to it
+        appR.current.labels.push({ x: 200, y: 100, text: 'A', tip: [20, 20], fill: '#FFEB3B', marker: 2.5 });     // square on the green mark
+        appR.current.labels.push({ x: 250, y: 200, text: 'B', tip: null, fill: '#FF3B30', marker: 3 });
+        appR.persist(); appR.selected = 1; appR.refresh();
+        appR.rotate(90);
+        let A = appR.current.labels[0], B = appR.current.labels[1];
+        check(appR.current.labels.length === 2 && A.text === 'A' && B.text === 'B' && B.fill === '#FF3B30' && B.marker === 3, 'labels survive a rotation with their text, colour and size');
+        check(at(A) === '200,200,280,20' && at(B) === '100,250', `points mapped through the 90° turn: A=${at(A)} B=${at(B)}`);
+        fullR = appR.renderFull();
+        check(px(fullR, A.tip[0], A.tip[1]) === '#FFEB3B' && px(fullR, 268, 20) === '#00FF00', 'the square still sits on the green mark after rotating');
+        check(appR.selected === 1, 'the selection is kept');
+        appR.rotate(90); A = appR.current.labels[0];
+        check(appR.current.rotation === 180 && at(A) === '200,200,380,280' && px(appR.renderFull(), 368, 280) === '#00FF00', `180°: A=${at(A)}, square still on the mark`);
+        appR.rotate(90); A = appR.current.labels[0];
+        check(appR.current.rotation === 270 && at(A) === '100,200,20,380' && px(appR.renderFull(), 32, 380) === '#00FF00', `270°: A=${at(A)}, square still on the mark`);
+        appR.rotate(90); A = appR.current.labels[0]; B = appR.current.labels[1];
+        check(appR.current.rotation === 0 && at(A) === '200,100,20,20' && at(B) === '250,200', 'four turns bring every label exactly back');
+        appR.rotate(-90); A = appR.current.labels[0];
+        check(appR.current.rotation === 270 && at(A) === '100,200,20,380', 'a left turn maps the other way');
+        keyR('z'); A = appR.current.labels[0];
+        check(appR.current.rotation === 0 && appR.current.width === 400 && at(A) === '200,100,20,20', 'one Z brings back both the label positions and the old orientation');
+        keyR('y'); check(appR.current.rotation === 270 && at(appR.current.labels[0]) === '100,200,20,380', 'Y redoes the turn');
         keyR('z');
-        check(appR.current.labels.length === 2 && appR.current.rotation === 0, 'keys other than Esc are ignored while the dialog is open');
-        cancelBtn().click();
-        check((await pending) === false && appR.dialogEl.hidden && appR.current.labels.length === 2 && appR.current.rotation === 0, 'Cancel keeps the labels and the orientation');
-        pending = appR.rotate(90); await tick();
-        keyR('Escape');
-        check((await pending) === false && appR.dialogEl.hidden && appR.current.labels.length === 2, 'Esc cancels too');
-        pending = appR.rotate(90); await tick();
-        appR.dialogEl.click();                                  // the dark backdrop, outside the box
-        check((await pending) === false && appR.current.labels.length === 2, 'clicking the backdrop cancels');
-        pending = appR.rotate(90); await tick();
-        okBtn().click();
-        check((await pending) === true && appR.dialogEl.hidden, 'confirming closes the dialog and rotates');
-        check(appR.current.labels.length === 0 && appR.current.rotation === 90 && appR.current.width === 300, 'labels deleted and photo rotated');
-        check(appR.statusEl.textContent.includes('Undo'), `status points at Undo: "${appR.statusEl.textContent.split('|')[0].trim()}"`);
-        keyR('z');
-        check(appR.current.labels.length === 2 && appR.current.labels[0].text === 'A' && appR.current.rotation === 0 && appR.current.width === 400,
-          'one Z brings back both the labels and the old orientation');
-        keyR('y');
-        check(appR.current.labels.length === 0 && appR.current.rotation === 90, 'Y redoes the rotate-and-delete');
-        keyR('z');
-        // rotating while typing a label counts that label
+        // a label being typed is placed first, then turns with the rest
         appR.openEntry([100, 100], [50, 50], null); appR.entryEl.value = 'C';
-        pending = appR.rotate(90); await tick();
-        check(!appR.entry && appR.current.labels.length === 3 && !appR.dialogEl.hidden && /3 labels/.test(appR.dialogEl.querySelector('.bbl-dialog-text').textContent), 'a label being typed is placed first and counted');
-        cancelBtn().click(); await pending;
-        // persistence: rotation is remembered per photo along with the labels
-        pending = appR.rotate(90); await tick(); okBtn().click(); await pending;
+        appR.rotate(90);
+        check(!appR.entry && appR.current.labels.length === 3 && at(appR.current.labels[2]) === '200,100,250,50', 'a label being typed is placed and rotated with the others');
+        keyR('z'); keyR('z');
+        check(appR.current.labels.length === 2 && appR.current.rotation === 0, 'Z undoes the turn, then the placement');
+        // persistence: rotation is remembered per photo along with the (rotated) labels
+        appR.rotate(90);
         check(JSON.parse(localStorage.getItem('bbl.rotation'))[appR.current.key] === 90, 'rotation persisted to localStorage');
         const appR2 = new Labeler(document.createElement('div'), { resume: false });
         document.body.appendChild(appR2.container);
         await appR2.openFiles([fR]); await tick();
-        check(appR2.current.rotation === 90 && appR2.current.width === 300 && appR2.current.height === 400 && px(appR2.renderFull(), 290, 10) === '#00FF00', 'reopening the photo restores its rotation');
-        await appR2.rotate(-90);
+        check(appR2.current.rotation === 90 && appR2.current.width === 300 && appR2.current.height === 400 && px(appR2.renderFull(), 268, 20) === '#00FF00', 'reopening the photo restores its rotation');
+        check(appR2.current.labels.length === 2 && at(appR2.current.labels[0]) === '200,200,280,20', 'and its labels come back in the rotated frame');
+        appR2.rotate(-90);
         check(appR2.current.rotation === 0 && !(appR2.current.key in JSON.parse(localStorage.getItem('bbl.rotation'))), 'rotating back to 0 drops the stored entry');
         // the rotation survives the photo being evicted and re-decoded
-        await appR.rotate(90);                                  // now 180
+        appR.rotate(90);                                        // now 180
         appR.current.bitmap = null; await appR.load(0); await tick();
         check(appR.current.rotation === 180 && appR.current.width === 400 && px(appR.renderFull(), 390, 290) === '#00FF00', 'rotation reapplied after a re-decode');
         appR.container.remove(); appR2.container.remove();

@@ -181,7 +181,7 @@ const HELP = [
   ['C / K', 'cycle colours / colour picker'],
   ['+ button', 'save the current colour as a preset (right-click a custom one to remove)'],
   ['Shift-click', 'text only, no square'],
-  ['R / Shift-R', 'rotate the photo right / left (its labels are removed, after a warning; Z brings them back)'],
+  ['R / Shift-R', 'rotate the photo right / left (labels turn with it)'],
 ];
 
 export class Labeler {
@@ -195,7 +195,6 @@ export class Labeler {
     if (!['folder', 'download'].includes(this.style.saveTo)) this.style.saveTo = 'folder';
     this.saved = loadJSON(LABELS_KEY, {});
     this.rotations = loadJSON(ROTATION_KEY, {});
-    this.dialog = null;          // {resolve} while a confirmation is open
     this.custom = (loadJSON(PRESETS_KEY, []) || []).filter((c) => /^#[0-9A-F]{6}$/i.test(c)).map((c) => c.toUpperCase());
     this.selected = null;
     this.textOnly = false;
@@ -255,13 +254,6 @@ export class Labeler {
         <input class="bbl-entry" hidden spellcheck="false">
         <div class="bbl-drop"><div>Drop photos here, or use Open photos</div><button class="bbl-resume" hidden>Reopen last session</button></div>
         <div class="bbl-help" hidden>${HELP.map(([k, v]) => `<div><b>${k}</b><span>${v}</span></div>`).join('')}</div>
-      </div>
-      <div class="bbl-dialog" hidden role="dialog" aria-modal="true">
-        <div class="bbl-dialog-box">
-          <p class="bbl-dialog-text"></p>
-          <p class="bbl-dialog-note"></p>
-          <div class="bbl-dialog-buttons"><button class="bbl-dialog-cancel">Cancel</button><button class="bbl-dialog-ok bbl-primary"></button></div>
-        </div>
       </div>`;
     this.fileInput = c.querySelector('input[type=file]');
     this.folderInput = c.querySelector('.bbl-folder-input');
@@ -283,7 +275,6 @@ export class Labeler {
     this.formatSelect = c.querySelector('.bbl-format');
     this.formatSelect.value = this.style.format;
     this.swatchesEl = c.querySelector('.bbl-swatches');
-    this.dialogEl = c.querySelector('.bbl-dialog');
     this.renderSwatches();
   }
 
@@ -354,10 +345,6 @@ export class Labeler {
     });
     this.colourInput.addEventListener('input', () => this.applyColour(this.colourInput.value.toUpperCase()));
     this.formatSelect.addEventListener('change', () => this.setFormat(this.formatSelect.value));
-    this.dialogEl.addEventListener('click', (e) => {
-      if (e.target.closest('.bbl-dialog-ok')) this.closeDialog(true);
-      else if (e.target.closest('.bbl-dialog-cancel') || e.target === this.dialogEl) this.closeDialog(false);   // backdrop click cancels
-    });
     const cv = this.canvas;
     cv.addEventListener('pointerdown', (e) => this.onPress(e));
     cv.addEventListener('pointermove', (e) => this.onDrag(e));
@@ -831,8 +818,8 @@ export class Labeler {
   }
 
   // ---- undo / redo ----------------------------------------------------- //
-  // An undo step is {labels, rotation}: rotating a photo removes its labels, and one Z
-  // must bring both the labels and the old orientation back together.
+  // An undo step is {labels, rotation}: rotating a photo moves every label with it, and one Z
+  // must bring both the label positions and the old orientation back together.
   snapshot() {
     const im = this.current; if (!im) return;
     im.undo.push({ labels: im.labels.map((l) => ({ ...l, tip: l.tip ? [...l.tip] : null })), rotation: im.rotation });
@@ -865,52 +852,26 @@ export class Labeler {
     if (im.bitmap) this.applyDims(im);
     if (this.base && this.base.im === im) this.base = null;    // the screen-sized copy is stale
   }
-  /** Rotate the current photo by 90 degrees (delta > 0 clockwise). Labels are positioned in image
-   *  pixels, so they would land in the wrong place: they are removed, after a warning when there
-   *  are any. One Z undoes the whole thing. Resolves to true if the photo was rotated. */
-  async rotate(delta) {
+  /** Rotate the current photo by 90 degrees (delta > 0 clockwise). Labels turn with it: their
+   *  positions are in image pixels, so each point is mapped through the same rotation. Sizes are
+   *  percentages of the image width, so a label keeps its proportions. One Z undoes it. */
+  rotate(delta) {
     const im = this.current;
-    if (!im || !im.bitmap || this.dialog) return false;
+    if (!im || !im.bitmap) return false;
     this.commitEntry();
-    const n = im.labels.length;
-    if (n) {
-      const ok = await this.confirm({
-        text: `This photo has ${n} label${n === 1 ? '' : 's'}. Rotating it deletes ${n === 1 ? 'that label' : 'all of them'}.`,
-        note: 'You can get the labels and the old orientation back with the Undo button (Z).',
-        ok: `Delete ${n === 1 ? 'the label' : `${n} labels`} and rotate`,
-      });
-      if (!ok || this.current !== im) return false;
-    }
     this.snapshot();
-    im.labels = [];
-    this.selected = null;
-    this.setRotation(im, im.rotation + delta);
+    const { width: w, height: h } = im;
+    const turn = ((delta % 360) + 360) % 360;
+    const map = ([x, y]) => {
+      if (turn === 90) return [h - y, x];
+      if (turn === 180) return [w - x, h - y];
+      if (turn === 270) return [y, w - x];
+      return [x, y];
+    };
+    im.labels = im.labels.map((lb) => { const [x, y] = map([lb.x, lb.y]); return { ...lb, x, y, tip: lb.tip ? map(lb.tip) : null }; });
+    this.setRotation(im, im.rotation + turn);
     this.changed();
-    if (n) this.flash(`Rotated and removed ${n} label${n === 1 ? '' : 's'}. Undo (Z) brings them back.`);
     return true;
-  }
-
-  // ---- confirmation dialog --------------------------------------------- //
-  /** In-app yes/no box (not window.confirm, which cannot be styled or driven in tests).
-   *  Resolves to true for the primary button, false for Cancel, Esc or a click on the backdrop. */
-  confirm({ text, note = '', ok = 'OK', cancel = 'Cancel' }) {
-    if (this.dialog) this.closeDialog(false);
-    const d = this.dialogEl;
-    d.querySelector('.bbl-dialog-text').textContent = text;
-    const noteEl = d.querySelector('.bbl-dialog-note');
-    noteEl.textContent = note; noteEl.hidden = !note;
-    d.querySelector('.bbl-dialog-ok').textContent = ok;
-    d.querySelector('.bbl-dialog-cancel').textContent = cancel;
-    d.hidden = false;
-    d.querySelector('.bbl-dialog-cancel').focus();     // Enter by reflex should not destroy anything
-    return new Promise((resolve) => { this.dialog = { resolve }; });
-  }
-  closeDialog(answer) {
-    if (!this.dialog) return;
-    const { resolve } = this.dialog;
-    this.dialog = null;
-    this.dialogEl.hidden = true;
-    resolve(!!answer);
   }
 
   // ---- geometry -------------------------------------------------------- //
@@ -1186,10 +1147,6 @@ export class Labeler {
     if (e.target && e.target.matches && e.target.matches('input, textarea, select')) return;
     if (e.metaKey || e.altKey) return;
     const k = e.key.toLowerCase();
-    if (this.dialog) {                         // a confirmation is open: Esc cancels, nothing else reaches the app
-      if (k === 'escape') { e.preventDefault(); this.closeDialog(false); }
-      return;
-    }
     const acts = {
       r: () => this.rotate(e.shiftKey ? -90 : 90),
       s: () => this.saveAndNext(), n: () => this.step(1), arrowright: () => this.step(1),
