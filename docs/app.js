@@ -175,6 +175,7 @@ const HELP = [
   ['O / F', 'open more photos / a whole folder'],
   ['N / P', 'next / previous photo'],
   ['Z / Y', 'undo / redo'],
+  ['D', 'done with this photo: take it off the list (its labels are kept in case you reopen it)'],
   ['Delete', 'delete the selected label'],
   ['+ / -', 'text size'],
   ['[ / ]', 'square size'],
@@ -195,6 +196,7 @@ export class Labeler {
     if (!['folder', 'download'].includes(this.style.saveTo)) this.style.saveTo = 'folder';
     this.saved = loadJSON(LABELS_KEY, {});
     this.rotations = loadJSON(ROTATION_KEY, {});
+    this.dialog = null;          // {resolve} while a question is on screen
     this.custom = (loadJSON(PRESETS_KEY, []) || []).filter((c) => /^#[0-9A-F]{6}$/i.test(c)).map((c) => c.toUpperCase());
     this.selected = null;
     this.textOnly = false;
@@ -226,6 +228,7 @@ export class Labeler {
         <button data-act="next" title="Next (N)">&#9654;</button>
         <button data-act="save" class="bbl-primary" title="Save this photo and go to the next (S)">Save</button>
         <button data-act="saveAll" title="Download every photo that has labels">Save all</button>
+        <button data-act="done" title="Done with this photo: take it off the list (D)">Done</button>
         <select class="bbl-format" title="Output format for every save, whatever the input was">
           <option value="jpg">as JPG</option><option value="png">as PNG</option>
         </select>
@@ -254,6 +257,13 @@ export class Labeler {
         <input class="bbl-entry" hidden spellcheck="false">
         <div class="bbl-drop"><div>Drop photos here, or use Open photos</div><button class="bbl-resume" hidden>Reopen last session</button></div>
         <div class="bbl-help" hidden>${HELP.map(([k, v]) => `<div><b>${k}</b><span>${v}</span></div>`).join('')}</div>
+      </div>
+      <div class="bbl-dialog" hidden role="dialog" aria-modal="true">
+        <div class="bbl-dialog-box">
+          <p class="bbl-dialog-text"></p>
+          <p class="bbl-dialog-note"></p>
+          <div class="bbl-dialog-buttons"></div>
+        </div>
       </div>`;
     this.fileInput = c.querySelector('input[type=file]');
     this.folderInput = c.querySelector('.bbl-folder-input');
@@ -275,6 +285,7 @@ export class Labeler {
     this.formatSelect = c.querySelector('.bbl-format');
     this.formatSelect.value = this.style.format;
     this.swatchesEl = c.querySelector('.bbl-swatches');
+    this.dialogEl = c.querySelector('.bbl-dialog');
     this.renderSwatches();
   }
 
@@ -345,6 +356,11 @@ export class Labeler {
     });
     this.colourInput.addEventListener('input', () => this.applyColour(this.colourInput.value.toUpperCase()));
     this.formatSelect.addEventListener('change', () => this.setFormat(this.formatSelect.value));
+    this.dialogEl.addEventListener('click', (e) => {
+      const b = e.target.closest('.bbl-dialog-buttons button');
+      if (b) this.closeDialog(b.dataset.value);
+      else if (e.target === this.dialogEl) this.closeDialog(null);     // click on the backdrop cancels
+    });
     const cv = this.canvas;
     cv.addEventListener('pointerdown', (e) => this.onPress(e));
     cv.addEventListener('pointermove', (e) => this.onDrag(e));
@@ -368,7 +384,7 @@ export class Labeler {
 
   action(act) {
     const map = {
-      prev: () => this.step(-1), next: () => this.step(1), save: () => this.saveAndNext(), saveAll: () => this.saveAll(),
+      prev: () => this.step(-1), next: () => this.step(1), save: () => this.saveAndNext(), saveAll: () => this.saveAll(), done: () => this.done(),
       undo: () => this.undo(), redo: () => this.redo(), delete: () => this.deleteSelected(), edit: () => this.editSelected(),
       fontUp: () => this.adjustFont(0.25), fontDown: () => this.adjustFont(-0.25),
       markerUp: () => this.adjustMarker(0.25), markerDown: () => this.adjustMarker(-0.25),
@@ -410,7 +426,7 @@ export class Labeler {
         labels: stored ? stored.map((l) => ({ ...l })) : [], undo: [], redo: [], dirty: false,
       };
       this.images.push(im);
-      if (!im.cached) this.cacheJobs.push(this.writeCache(im));
+      if (!im.cached) { im.cacheJob = this.writeCache(im); this.cacheJobs.push(im.cacheJob); }
     }
     if (this.index < 0 && this.images.length) await this.load(0);
     else this.refresh();                 // redraw first: flash() must be the last thing to touch the status line
@@ -808,6 +824,95 @@ export class Labeler {
     this.refresh();
   }
 
+  // ---- done: take a photo off the list ----------------------------------- //
+  /** "I'm finished with this breadboard": drop the current photo from the queue, the remembered
+   *  session and the byte cache. Its labels stay in localStorage, so reopening the file later
+   *  brings them back. Unsaved labels get a question first: save and remove, remove, or cancel.
+   *  Resolves to true if the photo was removed. */
+  async done() {
+    const im = this.current;
+    if (!im || this.dialog) return false;
+    this.commitEntry();
+    if (im.dirty && im.labels.length) {
+      const n = im.labels.length;
+      const answer = await this.ask({
+        text: `${im.name} has ${n} label${n === 1 ? '' : 's'} that ${n === 1 ? 'has' : 'have'} not been saved.`,
+        note: 'Done takes the photo off the list. The labels are remembered, so reopening the photo brings them back.',
+        buttons: [{ label: 'Cancel', value: 'cancel' }, { label: 'Remove without saving', value: 'remove' }, { label: 'Save and remove', value: 'save', primary: true }],
+      });
+      if (answer === 'save') { if (!(await this.save(im))) return false; }
+      else if (answer !== 'remove') return false;
+      if (this.current !== im) return false;
+    }
+    await this.removeImage(im);
+    this.flash(`Done with ${im.name}; taken off the list.${this.images.length ? '' : ' Open more photos to continue.'}`);
+    return true;
+  }
+
+  /** Remove a photo from the queue (whether or not it is the current one) and forget its cached copy. */
+  async removeImage(im) {
+    const i = this.images.indexOf(im);
+    if (i < 0) return;
+    this._loadToken++;                           // a decode in flight for this photo must not finish into the queue
+    this.cancelEntry();
+    this.images.splice(i, 1);
+    if (im.bitmap && typeof im.bitmap.close === 'function') im.bitmap.close();
+    im.bitmap = null;
+    if (this.base && this.base.im === im) this.base = null;
+    if (this.images.length) {
+      const next = i < this.index ? this.index - 1 : Math.min(this.index, this.images.length - 1);
+      await this.load(next);                     // load() saves the session
+    } else {
+      this.index = -1; this.selected = null;
+      this.refresh();
+      await this.clearSession();                 // saveSession() would keep the old list when nothing is open
+    }
+    await this.removeCache(im);
+  }
+
+  /** Drop a photo's copy from the byte cache (waiting for an in-flight copy first). */
+  async removeCache(im) {
+    if (!OPFS) return false;
+    try {
+      if (im.cacheJob) await im.cacheJob;
+      const dir = await opfsDir('cache');
+      try { await dir.removeEntry(im.cacheName); } catch (err) { if (err.name !== 'NotFoundError') throw err; }
+      await this.updateCacheIndex((index) => { delete index[im.cacheName]; });
+      im.cached = false;
+      return true;
+    } catch (err) { console.warn('could not drop cached copy', im.name, err); return false; }
+  }
+
+  // ---- questions --------------------------------------------------------- //
+  /** In-app question box (not window.confirm, which cannot be styled or driven in tests).
+   *  buttons: [{label, value, primary?}]. Resolves to the chosen value, or null for Esc / backdrop.
+   *  The first button gets focus, so put the safe choice first. */
+  ask({ text, note = '', buttons }) {
+    if (this.dialog) this.closeDialog(null);
+    const d = this.dialogEl;
+    d.querySelector('.bbl-dialog-text').textContent = text;
+    const noteEl = d.querySelector('.bbl-dialog-note');
+    noteEl.textContent = note; noteEl.hidden = !note;
+    const row = d.querySelector('.bbl-dialog-buttons');
+    row.innerHTML = '';
+    for (const b of buttons) {
+      const el = document.createElement('button');
+      el.textContent = b.label; el.dataset.value = b.value;
+      if (b.primary) el.classList.add('bbl-primary');
+      row.appendChild(el);
+    }
+    d.hidden = false;
+    row.firstChild.focus();
+    return new Promise((resolve) => { this.dialog = { resolve }; });
+  }
+  closeDialog(value) {
+    if (!this.dialog) return;
+    const { resolve } = this.dialog;
+    this.dialog = null;
+    this.dialogEl.hidden = true;
+    resolve(value);
+  }
+
   persist() {
     for (const im of this.images) {
       this.saved[im.key] = im.labels;
@@ -1147,8 +1252,12 @@ export class Labeler {
     if (e.target && e.target.matches && e.target.matches('input, textarea, select')) return;
     if (e.metaKey || e.altKey) return;
     const k = e.key.toLowerCase();
+    if (this.dialog) {                         // a question is on screen: Esc cancels, nothing else reaches the app
+      if (k === 'escape') { e.preventDefault(); this.closeDialog(null); }
+      return;
+    }
     const acts = {
-      r: () => this.rotate(e.shiftKey ? -90 : 90),
+      r: () => this.rotate(e.shiftKey ? -90 : 90), d: () => this.done(),
       s: () => this.saveAndNext(), n: () => this.step(1), arrowright: () => this.step(1),
       p: () => this.step(-1), arrowleft: () => this.step(-1),
       z: () => (e.ctrlKey && e.shiftKey ? this.redo() : this.undo()), y: () => this.redo(),

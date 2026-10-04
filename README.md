@@ -26,6 +26,9 @@ it works offline.
 4. **Save** writes `name_labeled.jpg` and moves to the next photo. **Save all** does every
    labelled photo. The **as JPG / as PNG** dropdown picks the output format for every save,
    whatever the input was.
+5. **Done** (or D) when you are finished with a breadboard: the photo comes off the list and is not
+   reopened next time. If it has labels you have not saved yet, you are asked whether to save first.
+   Its labels are still remembered, so opening the same photo again later brings them back.
 
 **Where saves go.** In Chrome and Edge, photos opened with **Open folder** are saved straight
 into that folder, next to the originals, after a one-time "save changes" prompt from the browser.
@@ -49,6 +52,7 @@ restores them. Undo, redo, text size, square size and colour are all in the tool
 | Enter | place the label you are typing |
 | Esc | cancel the label you are typing, or clear the selection |
 | S | save and go to next photo |
+| D | done with this photo: take it off the list (asks first if it has unsaved labels) |
 | N / P (or arrow keys) | next / previous photo |
 | O / F | open more photos / a whole folder |
 | Z / Y | undo / redo |
