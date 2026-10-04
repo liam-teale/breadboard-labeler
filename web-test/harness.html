@@ -405,6 +405,75 @@
         appR.container.remove(); appR2.container.remove();
       }
 
+      // ---- done: take a photo off the list ------------------------------------------
+      {
+        const appD = new Labeler(document.createElement('div'), { resume: false });
+        document.body.appendChild(appD.container);
+        await appD.clearSession();
+        const fD = [];
+        for (let i = 0; i < 3; i++) fD.push(await toFile(makeBoard(300, 200), `d${i}.png`, 'image/png'));
+        await appD.openFiles(fD); await appD.whenCached(); await tick();
+        const namesD = () => appD.images.map((i) => i.name).join();
+        const keyD = (k, extra = {}) => document.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...extra }));
+        const btns = () => [...appD.dialogEl.querySelectorAll('.bbl-dialog-buttons button')];
+        const btn = (re) => btns().find((b) => re.test(b.textContent));
+        const cacheHas = async (im) => { try { await (await (await navigator.storage.getDirectory()).getDirectoryHandle('cache')).getFileHandle(im.cacheName); return true; } catch { return false; } };
+        const sessionNames = async () => { const s = await new Promise((res) => { const r = indexedDB.open('bbl', 1); r.onsuccess = () => { const t = r.result.transaction('kv').objectStore('kv').get('session'); t.onsuccess = () => res(t.result); }; }); return s ? s.items.map((i) => i.name).join() : ''; };
+        check(!!appD.container.querySelector('[data-act=done]'), 'Done button in the toolbar');
+        check(namesD() === 'd0.png,d1.png,d2.png' && appD.index === 0, `three photos open: ${namesD()}`);
+        // a clean photo goes straight away; the next one takes its place
+        const im0 = appD.images[0];
+        check(await cacheHas(im0), 'the first photo has a cached copy before Done');
+        check((await appD.done()) === true && appD.dialogEl.hidden, 'Done on a photo with nothing unsaved asks nothing');
+        check(namesD() === 'd1.png,d2.png' && appD.index === 0 && appD.current.name === 'd1.png' && !!appD.current.bitmap, `photo removed and the next one shown: ${namesD()} @ ${appD.index}`);
+        check(appD.statusEl.textContent.includes('Done with d0.png'), `status confirms: "${appD.statusEl.textContent.split('|')[0].trim()}"`);
+        check((await sessionNames()) === 'd1.png,d2.png', `remembered session no longer lists it: ${await sessionNames()}`);
+        check(!(await cacheHas(im0)), 'its cached copy is dropped');
+        // unsaved labels: a question with three choices
+        appD.current.labels.push({ x: 150, y: 80, text: 'Q1', tip: [60, 120], fill: '#FFEB3B', marker: 2.5 });
+        appD.current.dirty = true; appD.persist(); appD.refresh();
+        let pending = appD.done(); await tick();
+        check(!appD.dialogEl.hidden && !!appD.dialog, 'Done on a photo with unsaved labels asks first');
+        check(/d1\.png/.test(appD.dialogEl.querySelector('.bbl-dialog-text').textContent) && /1 label/.test(appD.dialogEl.querySelector('.bbl-dialog-text').textContent), `question names the photo and the count: "${appD.dialogEl.querySelector('.bbl-dialog-text').textContent}"`);
+        check(btns().length === 3 && !!btn(/^Cancel$/) && !!btn(/without saving/) && !!btn(/Save and remove/), `three choices: ${btns().map((b) => b.textContent).join(' / ')}`);
+        check(document.activeElement === btn(/^Cancel$/), 'Cancel has focus');
+        keyD('d'); keyD('n');
+        check(namesD() === 'd1.png,d2.png' && appD.index === 0, 'keys are ignored while the question is open');
+        btn(/^Cancel$/).click();
+        check((await pending) === false && appD.dialogEl.hidden && namesD() === 'd1.png,d2.png', 'Cancel keeps the photo');
+        pending = appD.done(); await tick(); keyD('Escape');
+        check((await pending) === false && namesD() === 'd1.png,d2.png', 'Esc keeps it too');
+        pending = appD.done(); await tick(); appD.dialogEl.click();
+        check((await pending) === false && namesD() === 'd1.png,d2.png', 'clicking the backdrop keeps it');
+        // save and remove
+        let saves = 0; const realSave = appD.save;
+        appD.save = async (im) => { saves++; im.dirty = false; return true; };
+        pending = appD.done(); await tick(); btn(/Save and remove/).click();
+        check((await pending) === true && saves === 1 && namesD() === 'd2.png' && appD.current.name === 'd2.png', `Save and remove saves once, then removes: ${namesD()}`);
+        appD.save = realSave;
+        check(JSON.parse(localStorage.getItem('bbl.labels'))[`d1.png|${fD[1].size}|${fD[1].lastModified}`].length === 1, 'the removed photo\'s labels are still remembered');
+        // a failed save keeps the photo
+        appD.current.labels.push({ x: 150, y: 80, text: 'Q2', tip: null, fill: '#FFEB3B', marker: 2.5 });
+        appD.current.dirty = true; appD.persist();
+        appD.save = async () => false;
+        pending = appD.done(); await tick(); btn(/Save and remove/).click();
+        check((await pending) === false && namesD() === 'd2.png', 'if the save fails, the photo stays');
+        appD.save = realSave;
+        // remove without saving the last photo: empty app, session cleared
+        pending = appD.done(); await tick(); btn(/without saving/).click();
+        check((await pending) === true && appD.images.length === 0 && appD.index === -1 && !appD.dropEl.hidden, 'removing the last photo empties the app and shows the drop zone');
+        check(appD.statusEl.textContent.includes('Open more photos'), 'status says what to do next');
+        check((await sessionNames()) === '', 'the remembered session is cleared, so nothing comes back on reload');
+        check((await appD.done()) === false, 'Done with nothing open does nothing');
+        // reopening a removed photo brings its labels back; D key works; removing the last in the list steps back
+        await appD.openFiles([fD[0], fD[1], fD[2]]); await tick();
+        check(namesD() === 'd0.png,d1.png,d2.png' && appD.images[1].labels.length === 1 && appD.images[1].labels[0].text === 'Q1', 'reopened photo has its labels back');
+        await appD.load(2); await tick();
+        keyD('d'); await tick(100);
+        check(namesD() === 'd0.png,d1.png' && appD.index === 1 && appD.current.name === 'd1.png', `D removes the last photo and steps back: ${namesD()} @ ${appD.index}`);
+        appD.container.remove();
+      }
+
       // screenshot state for a visual check
       app.load(0); app.selected = 0; app.refresh();
       // ---- File System Access: folder handles, save in place, session restore --
