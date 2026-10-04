@@ -21,6 +21,9 @@ it works offline.
    Or **drag** from the part to where the text should go.
 3. **Drag the text** or **the square** to move them. **Click a label** to select it,
    **double-click** to edit its text.
+   The **↺ / ↻** buttons (or R / Shift-R) **rotate the photo** in 90° steps; the saved copy comes out rotated.
+   Labels are placed in image pixels, so rotating a photo that already has labels removes them, after a warning
+   with the choice to go ahead or cancel. One Undo brings the labels and the old orientation back.
 4. **Save** writes `name_labeled.jpg` and moves to the next photo. **Save all** does every
    labelled photo. The **as JPG / as PNG** dropdown picks the output format for every save,
    whatever the input was.
@@ -57,6 +60,7 @@ restores them. Undo, redo, text size, square size and colour are all in the tool
 | K | pick any colour |
 | + (toolbar) | save the current colour as a preset; right-click a custom preset to remove it |
 | Shift-click | text-only label, no square (the "Text only" button does the same on touch screens) |
+| R / Shift-R | rotate the photo right / left by 90° (removes its labels, after a warning; Z undoes it) |
 | ? | show this list in the app |
 
 **Colours and square size:** with a label selected (click its text), C, K, [ and ] change that one
@@ -72,7 +76,8 @@ you can chain click, type, click, type without pressing Enter.
 
 - Text height defaults to 3% of the image width, so labels look the same size on a 12 MP phone
   photo and a 1200 px screenshot. Output is full resolution.
-- Photos with EXIF rotation are shown and saved upright.
+- Photos with EXIF rotation are shown and saved upright. A rotation you apply on top is remembered
+  per photo (with its labels) and applied when drawing, so it costs no extra memory.
 - Only the current photo and its two neighbours are kept decoded in memory, so opening a whole
   folder of 12 MP photos is fine. Nothing runs while you are not interacting.
 - HEIC files are decoded in the browser with [heic-to](https://github.com/hoppergee/heic-to)

@@ -58,6 +58,10 @@ export function isImageFile(file) {
   return (file.type.startsWith('image/') || IMAGE_NAME.test(file.name)) && !OUTPUT_NAME.test(file.name);
 }
 const LABELS_KEY = 'bbl.labels';
+// Per-photo rotation (0, 90, 180 or 270 degrees clockwise), kept alongside the labels because
+// label coordinates are in the rotated image.
+const ROTATION_KEY = 'bbl.rotation';
+const ROTATIONS = [0, 90, 180, 270];
 const DRAG_THRESHOLD = 6;
 // 0.85 is visually identical to 0.95 on a photo at half the file size.
 const JPEG_QUALITY = 0.85;
@@ -139,6 +143,20 @@ export function drawLabels(ctx, labels, fullWidth, style, scale, ox = 0, oy = 0)
   return boxes;
 }
 
+/** Draw a decoded photo rotated by `rotation` degrees clockwise so that it fills a w x h target
+ *  (w and h are the rotated photo's size in target pixels). Rotation is applied at draw time
+ *  rather than by making a rotated copy, so it costs no memory and is trivially undone. */
+export function drawRotated(ctx, bitmap, rotation, w, h) {
+  if (!rotation) { ctx.drawImage(bitmap, 0, 0, w, h); return; }
+  const quarter = rotation % 180 !== 0;
+  const sw = quarter ? h : w, sh = quarter ? w : h;     // the unrotated photo's size in target pixels
+  ctx.save();
+  ctx.translate(w / 2, h / 2);
+  ctx.rotate((rotation * Math.PI) / 180);
+  ctx.drawImage(bitmap, -sw / 2, -sh / 2, sw, sh);
+  ctx.restore();
+}
+
 function loadJSON(key, fallback) {
   try { const v = JSON.parse(localStorage.getItem(key)); return v ?? fallback; } catch { return fallback; }
 }
@@ -163,6 +181,7 @@ const HELP = [
   ['C / K', 'cycle colours / colour picker'],
   ['+ button', 'save the current colour as a preset (right-click a custom one to remove)'],
   ['Shift-click', 'text only, no square'],
+  ['R / Shift-R', 'rotate the photo right / left (its labels are removed, after a warning; Z brings them back)'],
 ];
 
 export class Labeler {
@@ -175,6 +194,8 @@ export class Labeler {
     if (!['jpg', 'png'].includes(this.style.format)) this.style.format = 'jpg';
     if (!['folder', 'download'].includes(this.style.saveTo)) this.style.saveTo = 'folder';
     this.saved = loadJSON(LABELS_KEY, {});
+    this.rotations = loadJSON(ROTATION_KEY, {});
+    this.dialog = null;          // {resolve} while a confirmation is open
     this.custom = (loadJSON(PRESETS_KEY, []) || []).filter((c) => /^#[0-9A-F]{6}$/i.test(c)).map((c) => c.toUpperCase());
     this.selected = null;
     this.textOnly = false;
@@ -218,6 +239,8 @@ export class Labeler {
         <button data-act="edit" title="Edit selected text (double-click)">Edit</button>
         <button data-act="delete" title="Delete selected (Del)">Delete</button>
         <span class="bbl-sep"></span>
+        <span class="bbl-group"><button data-act="rotateLeft" title="Rotate the photo left (Shift-R)">&#8634;</button><button data-act="rotateRight" title="Rotate the photo right (R)">&#8635;</button></span>
+        <span class="bbl-sep"></span>
         <span class="bbl-group" title="Text size (+ / -)">T <button data-act="fontDown">&minus;</button><button data-act="fontUp">+</button></span>
         <span class="bbl-group" title="Square size ([ / ])">&#9632; <button data-act="markerDown">&minus;</button><button data-act="markerUp">+</button></span>
         <span class="bbl-swatches"></span>
@@ -232,6 +255,13 @@ export class Labeler {
         <input class="bbl-entry" hidden spellcheck="false">
         <div class="bbl-drop"><div>Drop photos here, or use Open photos</div><button class="bbl-resume" hidden>Reopen last session</button></div>
         <div class="bbl-help" hidden>${HELP.map(([k, v]) => `<div><b>${k}</b><span>${v}</span></div>`).join('')}</div>
+      </div>
+      <div class="bbl-dialog" hidden role="dialog" aria-modal="true">
+        <div class="bbl-dialog-box">
+          <p class="bbl-dialog-text"></p>
+          <p class="bbl-dialog-note"></p>
+          <div class="bbl-dialog-buttons"><button class="bbl-dialog-cancel">Cancel</button><button class="bbl-dialog-ok bbl-primary"></button></div>
+        </div>
       </div>`;
     this.fileInput = c.querySelector('input[type=file]');
     this.folderInput = c.querySelector('.bbl-folder-input');
@@ -253,6 +283,7 @@ export class Labeler {
     this.formatSelect = c.querySelector('.bbl-format');
     this.formatSelect.value = this.style.format;
     this.swatchesEl = c.querySelector('.bbl-swatches');
+    this.dialogEl = c.querySelector('.bbl-dialog');
     this.renderSwatches();
   }
 
@@ -323,6 +354,10 @@ export class Labeler {
     });
     this.colourInput.addEventListener('input', () => this.applyColour(this.colourInput.value.toUpperCase()));
     this.formatSelect.addEventListener('change', () => this.setFormat(this.formatSelect.value));
+    this.dialogEl.addEventListener('click', (e) => {
+      if (e.target.closest('.bbl-dialog-ok')) this.closeDialog(true);
+      else if (e.target.closest('.bbl-dialog-cancel') || e.target === this.dialogEl) this.closeDialog(false);   // backdrop click cancels
+    });
     const cv = this.canvas;
     cv.addEventListener('pointerdown', (e) => this.onPress(e));
     cv.addEventListener('pointermove', (e) => this.onDrag(e));
@@ -350,6 +385,7 @@ export class Labeler {
       undo: () => this.undo(), redo: () => this.redo(), delete: () => this.deleteSelected(), edit: () => this.editSelected(),
       fontUp: () => this.adjustFont(0.25), fontDown: () => this.adjustFont(-0.25),
       markerUp: () => this.adjustMarker(0.25), markerDown: () => this.adjustMarker(-0.25),
+      rotateRight: () => this.rotate(90), rotateLeft: () => this.rotate(-90),
       textOnly: () => { this.textOnly = !this.textOnly; this.textOnlyBtn.classList.toggle('bbl-on', this.textOnly); },
       help: () => { this.helpEl.hidden = !this.helpEl.hidden; },
       addPreset: () => this.addPreset(),
@@ -383,6 +419,7 @@ export class Labeler {
         name: f.name, type: f.type, key, file: f, handle: e.handle || null, dir: e.dir || null, path: e.path || null,
         cacheName: cacheNameFor(key), cached: !!e.fromCache,
         bitmap: null, decoding: null, broken: false, width: 0, height: 0,
+        rotation: ROTATIONS.includes(this.rotations[key]) ? this.rotations[key] : 0,
         labels: stored ? stored.map((l) => ({ ...l })) : [], undo: [], redo: [], dirty: false,
       };
       this.images.push(im);
@@ -628,7 +665,7 @@ export class Labeler {
     if (im.bitmap) return Promise.resolve(im.bitmap);
     if (!im.decoding) {
       im.decoding = this.decode(im.file).then((bmp) => {
-        im.bitmap = bmp; im.width = bmp.width; im.height = bmp.height; im.decoding = null;
+        im.bitmap = bmp; this.applyDims(im); im.decoding = null;
         return bmp;
       }, (err) => { im.decoding = null; im.broken = true; throw err; });
     }
@@ -743,7 +780,7 @@ export class Labeler {
     const cv = document.createElement('canvas');
     cv.width = im.width; cv.height = im.height;
     const ctx = cv.getContext('2d');
-    ctx.drawImage(im.bitmap, 0, 0);
+    drawRotated(ctx, im.bitmap, im.rotation, im.width, im.height);
     drawLabels(ctx, im.labels, im.width, this.style, 1);
     return cv;
   }
@@ -785,25 +822,95 @@ export class Labeler {
   }
 
   persist() {
-    for (const im of this.images) this.saved[im.key] = im.labels;
+    for (const im of this.images) {
+      this.saved[im.key] = im.labels;
+      if (im.rotation) this.rotations[im.key] = im.rotation; else delete this.rotations[im.key];
+    }
     saveJSON(LABELS_KEY, this.saved);
+    saveJSON(ROTATION_KEY, this.rotations);
   }
 
   // ---- undo / redo ----------------------------------------------------- //
+  // An undo step is {labels, rotation}: rotating a photo removes its labels, and one Z
+  // must bring both the labels and the old orientation back together.
   snapshot() {
     const im = this.current; if (!im) return;
-    im.undo.push(im.labels.map((l) => ({ ...l, tip: l.tip ? [...l.tip] : null })));
+    im.undo.push({ labels: im.labels.map((l) => ({ ...l, tip: l.tip ? [...l.tip] : null })), rotation: im.rotation });
     if (im.undo.length > 100) im.undo.shift();
     im.redo.length = 0;
+  }
+  restore(im, state) {
+    im.labels = state.labels;
+    if (state.rotation !== im.rotation) this.setRotation(im, state.rotation);
   }
   changed() { const im = this.current; if (im) { im.dirty = true; this.persist(); } this.refresh(); }
   undo() {
     const im = this.current; if (!im || !im.undo.length) { this.flash('Nothing to undo.'); return; }
-    im.redo.push(im.labels); im.labels = im.undo.pop(); this.selected = null; this.changed();
+    im.redo.push({ labels: im.labels, rotation: im.rotation }); this.restore(im, im.undo.pop()); this.selected = null; this.changed();
   }
   redo() {
     const im = this.current; if (!im || !im.redo.length) { this.flash('Nothing to redo.'); return; }
-    im.undo.push(im.labels); im.labels = im.redo.pop(); this.selected = null; this.changed();
+    im.undo.push({ labels: im.labels, rotation: im.rotation }); this.restore(im, im.redo.pop()); this.selected = null; this.changed();
+  }
+
+  // ---- rotation -------------------------------------------------------- //
+  /** Displayed size of a decoded photo: the bitmap's size, swapped at 90 and 270 degrees. */
+  applyDims(im) {
+    const b = im.bitmap, quarter = im.rotation % 180 !== 0;
+    im.width = quarter ? b.height : b.width;
+    im.height = quarter ? b.width : b.height;
+  }
+  setRotation(im, deg) {
+    im.rotation = ((deg % 360) + 360) % 360;
+    if (im.bitmap) this.applyDims(im);
+    if (this.base && this.base.im === im) this.base = null;    // the screen-sized copy is stale
+  }
+  /** Rotate the current photo by 90 degrees (delta > 0 clockwise). Labels are positioned in image
+   *  pixels, so they would land in the wrong place: they are removed, after a warning when there
+   *  are any. One Z undoes the whole thing. Resolves to true if the photo was rotated. */
+  async rotate(delta) {
+    const im = this.current;
+    if (!im || !im.bitmap || this.dialog) return false;
+    this.commitEntry();
+    const n = im.labels.length;
+    if (n) {
+      const ok = await this.confirm({
+        text: `This photo has ${n} label${n === 1 ? '' : 's'}. Rotating it deletes ${n === 1 ? 'that label' : 'all of them'}.`,
+        note: 'You can get the labels and the old orientation back with the Undo button (Z).',
+        ok: `Delete ${n === 1 ? 'the label' : `${n} labels`} and rotate`,
+      });
+      if (!ok || this.current !== im) return false;
+    }
+    this.snapshot();
+    im.labels = [];
+    this.selected = null;
+    this.setRotation(im, im.rotation + delta);
+    this.changed();
+    if (n) this.flash(`Rotated and removed ${n} label${n === 1 ? '' : 's'}. Undo (Z) brings them back.`);
+    return true;
+  }
+
+  // ---- confirmation dialog --------------------------------------------- //
+  /** In-app yes/no box (not window.confirm, which cannot be styled or driven in tests).
+   *  Resolves to true for the primary button, false for Cancel, Esc or a click on the backdrop. */
+  confirm({ text, note = '', ok = 'OK', cancel = 'Cancel' }) {
+    if (this.dialog) this.closeDialog(false);
+    const d = this.dialogEl;
+    d.querySelector('.bbl-dialog-text').textContent = text;
+    const noteEl = d.querySelector('.bbl-dialog-note');
+    noteEl.textContent = note; noteEl.hidden = !note;
+    d.querySelector('.bbl-dialog-ok').textContent = ok;
+    d.querySelector('.bbl-dialog-cancel').textContent = cancel;
+    d.hidden = false;
+    d.querySelector('.bbl-dialog-cancel').focus();     // Enter by reflex should not destroy anything
+    return new Promise((resolve) => { this.dialog = { resolve }; });
+  }
+  closeDialog(answer) {
+    if (!this.dialog) return;
+    const { resolve } = this.dialog;
+    this.dialog = null;
+    this.dialogEl.hidden = true;
+    resolve(!!answer);
   }
 
   // ---- geometry -------------------------------------------------------- //
@@ -872,7 +979,7 @@ export class Labeler {
     if (b && b.im === im && b.canvas.width === pw && b.canvas.height === ph) return b.canvas;
     const canvas = document.createElement('canvas');
     canvas.width = pw; canvas.height = ph;
-    canvas.getContext('2d').drawImage(im.bitmap, 0, 0, pw, ph);
+    drawRotated(canvas.getContext('2d'), im.bitmap, im.rotation, pw, ph);
     this.base = { im, canvas };
     return canvas;
   }
@@ -915,7 +1022,8 @@ export class Labeler {
     if (!im) { this.statusEl.textContent = extra || 'Open some photos to start. Photos stay on your device.'; return; }
     const sel = this.selected !== null && im.labels[this.selected] ? `  ·  selected: "${im.labels[this.selected].text}"` : '';
     const where = FS_ACCESS && s.saveTo === 'folder' && im.dir ? ' into its folder' : ' to Downloads';
-    const base = `${im.name}${im.dirty ? ' *' : ''}  ·  labels: ${im.labels.length}${sel}  ·  text ${s.fontPct}%  square ${s.markerPct}%  colour ${s.fill}  ·  saves as ${s.format.toUpperCase()}${where}`;
+    const rot = im.rotation ? `  ·  rotated ${im.rotation}°` : '';
+    const base = `${im.name}${im.dirty ? ' *' : ''}  ·  labels: ${im.labels.length}${sel}${rot}  ·  text ${s.fontPct}%  square ${s.markerPct}%  colour ${s.fill}  ·  saves as ${s.format.toUpperCase()}${where}`;
     this.statusEl.textContent = extra ? `${extra}   |   ${base}` : base;
     this.colourInput.value = s.fill;
   }
@@ -1078,7 +1186,12 @@ export class Labeler {
     if (e.target && e.target.matches && e.target.matches('input, textarea, select')) return;
     if (e.metaKey || e.altKey) return;
     const k = e.key.toLowerCase();
+    if (this.dialog) {                         // a confirmation is open: Esc cancels, nothing else reaches the app
+      if (k === 'escape') { e.preventDefault(); this.closeDialog(false); }
+      return;
+    }
     const acts = {
+      r: () => this.rotate(e.shiftKey ? -90 : 90),
       s: () => this.saveAndNext(), n: () => this.step(1), arrowright: () => this.step(1),
       p: () => this.step(-1), arrowleft: () => this.step(-1),
       z: () => (e.ctrlKey && e.shiftKey ? this.redo() : this.undo()), y: () => this.redo(),
