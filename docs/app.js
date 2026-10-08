@@ -4,6 +4,8 @@
 // never leave the device, and the original files are never modified: saving
 // always downloads a new *_labeled copy.
 
+import { AD_PINOUT, PINS, pinById } from './pinouts.js';
+
 // Presets follow the Analog Discovery (WaveForms) channel colours the group uses:
 // yellow, orange, blue, pink, green, brown, then red, white, light grey, black.
 export const COLOURS = ['#FFEB3B', '#FF9800', '#2962FF', '#FF66CC', '#76FF03', '#8D5524',
@@ -14,6 +16,10 @@ const PRESETS_KEY = 'bbl.customColours';
 // 10-bit HDR files newer iPhones produce), fetched only the first time such a
 // file is opened. The "csp" build avoids eval so it also runs under a strict CSP.
 const HEIC_DECODER_URL = 'https://cdn.jsdelivr.net/npm/heic-to@1.5.2/dist/csp/heic-to.min.js';
+// Maths in labels: $...$ or \(...\) is typeset with MathJax (TeX to SVG), fetched the first time such a
+// label is drawn (about 2 MB) and kept by the service worker. The text around it stays bold Arial.
+const MATHJAX_URL = 'https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js';
+const MATH_RE = /\$([^$]+)\$|\\\((.+?)\\\)/g;
 const IMAGE_NAME = /\.(jpe?g|png|webp|gif|bmp|avif|tiff?|heic|heif)$/i;
 const HEIC_NAME = /\.hei[cf]$/i;
 const OUTPUT_NAME = /_labeled(_\d+)?\.[^.]+$/i;
@@ -73,6 +79,103 @@ export function outlineFor(fill) {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.5 ? '#000000' : '#FFFFFF';
 }
 
+/** Split label text into text and TeX parts: "10 k$\\Omega$" -> [{text: '10 k'}, {tex: '\\Omega'}].
+ *  A lone $ stays text. Text with no maths comes back as a single part. */
+export function splitMath(text) {
+  const parts = [];
+  let last = 0;
+  MATH_RE.lastIndex = 0;
+  for (let m; (m = MATH_RE.exec(text));) {
+    if (m.index > last) parts.push({ text: text.slice(last, m.index) });
+    const tex = (m[1] ?? m[2]).trim();
+    parts.push(tex ? { tex } : { text: m[0] });
+    last = m.index + m[0].length;
+  }
+  if (last < text.length || !parts.length) parts.push({ text: text.slice(last) });
+  return parts;
+}
+
+/** TeX -> SVG images, typeset once per expression and shared by every label and every photo.
+ *  An entry is {status: 'pending' | 'ready' | 'failed', w, h, depth (in ex), imgs: {colour: Image}, done}.
+ *  Drawing never waits: while an expression is pending (or if it failed) the label shows the raw
+ *  TeX, and listeners are told to redraw when it is ready. Saving waits via ready(). */
+export const math = {
+  cache: new Map(), listeners: new Set(), loading: null, retryAt: 0,
+  listen(fn) { this.listeners.add(fn); },
+  notify() { for (const fn of this.listeners) fn(); },
+  load() {
+    if (this.loading) return this.loading;
+    if (typeof window.MathJax?.tex2svgPromise === 'function') { this.loading = Promise.resolve(); return this.loading; }
+    window.MathJax = { startup: { typeset: false }, svg: { fontCache: 'none' }, options: { enableMenu: false } };
+    this.loading = new Promise((resolve, reject) => {
+      const sc = document.createElement('script');
+      sc.src = MATHJAX_URL; sc.async = true;
+      sc.onload = () => window.MathJax.startup.promise.then(resolve, reject);
+      sc.onerror = () => reject(new Error('MathJax failed to load'));
+      document.head.appendChild(sc);
+    }).catch((err) => { this.loading = null; this.retryAt = Date.now() + 30000; throw err; });
+    return this.loading;
+  },
+  /** The entry for a TeX expression, starting its render if needed. Never blocks. */
+  get(tex) {
+    let e = this.cache.get(tex);
+    if (e && !(e.status === 'failed' && e.retry && Date.now() >= this.retryAt)) return e;
+    e = { status: 'pending', retry: false, done: null };
+    this.cache.set(tex, e);
+    e.done = this.render(tex, e);
+    return e;
+  },
+  async render(tex, e) {
+    let loaded = false;
+    try {
+      if (Date.now() < this.retryAt) throw new Error('MathJax unavailable');
+      await this.load();
+      loaded = true;
+      const svg = (await window.MathJax.tex2svgPromise(tex, { display: false })).querySelector('svg');
+      const ex = (v) => parseFloat(v) || 0;
+      e.w = ex(svg.getAttribute('width')); e.h = ex(svg.getAttribute('height'));
+      e.depth = -ex(svg.style.verticalAlign);                 // how far it hangs below the baseline
+      svg.setAttribute('width', `${e.w * 100}px`); svg.setAttribute('height', `${e.h * 100}px`);   // a large intrinsic size, so it stays sharp
+      const src = svg.outerHTML;
+      e.imgs = {};
+      await Promise.all(['#000000', '#FFFFFF'].map((col) => new Promise((resolve, reject) => {   // the two text colours outlineFor() can pick
+        const img = new Image();
+        img.onload = () => resolve(); img.onerror = () => reject(new Error('bad SVG'));
+        img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(src.replace(/currentColor/g, col))}`;
+        e.imgs[col] = img;
+      })));
+      e.status = 'ready';
+    } catch (err) {
+      e.status = 'failed'; e.retry = !loaded; e.error = err;
+      console.warn('maths', tex, err);
+      if (!loaded) return;                                       // nothing new to draw: the raw TeX stays until the next try
+    }
+    this.notify();
+  },
+  /** Resolves once every expression in these labels has been typeset (or has failed). */
+  ready(labels) {
+    const waits = [];
+    for (const lb of labels) for (const p of splitMath(lb.text)) if (p.tex) waits.push(this.get(p.tex).done);
+    return Promise.all(waits);
+  },
+};
+
+/** Lay out one label's text as parts to draw left to right: {text, w, asc, desc} or
+ *  {img, w, hPx, above, asc, desc}. asc/desc are relative to the 'middle' text baseline; base is
+ *  where the alphabetic baseline sits below it and exPx the font's x-height, which MathJax matches. */
+function layoutParts(ctx, text, fontPx, base, exPx) {
+  const out = [];
+  const textPart = (t) => { const m = ctx.measureText(t); return { text: t, w: m.width, asc: m.actualBoundingBoxAscent || fontPx * 0.4, desc: m.actualBoundingBoxDescent || fontPx * 0.4 }; };
+  for (const p of splitMath(text)) {
+    if (!p.tex) { out.push(textPart(p.text)); continue; }
+    const e = math.get(p.tex);
+    if (e.status !== 'ready') { out.push(textPart(`$${p.tex}$`)); continue; }
+    const above = (e.h - e.depth) * exPx, below = e.depth * exPx;
+    out.push({ img: e.imgs, w: e.w * exPx, hPx: e.h * exPx, above, asc: above - base, desc: below + base });
+  }
+  return out;
+}
+
 export function metrics(fullWidth, style, scale) {
   const fontPx = Math.max(6, (fullWidth * style.fontPct) / 100 * scale);
   return { fontPx, pad: Math.max(2, fontPx * 0.3), lineW: Math.max(2, fontPx * 0.16) };
@@ -90,7 +193,7 @@ function roundRect(ctx, [x0, y0, x1, y1], r) {
   ctx.closePath();
 }
 
-function drawLeader(ctx, box, cx, cy, tx, ty, side, lineW, edge, fill, outline) {
+function drawLeader(ctx, box, cx, cy, tx, ty, side, lineW, edge, fill, outline, stripe = null) {
   const half = side / 2;
   const dx = tx - cx, dy = ty - cy;
   const dist = Math.hypot(dx, dy);
@@ -105,10 +208,21 @@ function drawLeader(ctx, box, cx, cy, tx, ty, side, lineW, edge, fill, outline) 
       ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey);
       ctx.lineWidth = lineW + 2 * edge; ctx.strokeStyle = outline; ctx.stroke();
       ctx.lineWidth = lineW; ctx.strokeStyle = fill; ctx.stroke();
+      if (stripe) {                                            // a striped wire: dashes down the middle of the line
+        ctx.save(); ctx.setLineDash([lineW * 1.5, lineW * 1.5]);
+        ctx.lineWidth = lineW * 0.5; ctx.strokeStyle = stripe; ctx.stroke();
+        ctx.restore();
+      }
     }
   }
   ctx.fillStyle = fill;
   ctx.fillRect(tx - half, ty - half, side, side);
+  if (stripe) {                                                // and a diagonal band across the square
+    ctx.save(); ctx.beginPath(); ctx.rect(tx - half, ty - half, side, side); ctx.clip();
+    ctx.beginPath(); ctx.moveTo(tx - half, ty - half); ctx.lineTo(tx + half, ty + half);
+    ctx.lineWidth = side * 0.3; ctx.strokeStyle = stripe; ctx.stroke();
+    ctx.restore();
+  }
   ctx.lineWidth = edge; ctx.strokeStyle = outline;
   ctx.strokeRect(tx - half, ty - half, side, side);
 }
@@ -119,26 +233,42 @@ export function drawLabels(ctx, labels, fullWidth, style, scale, ox = 0, oy = 0)
   const { fontPx, pad, lineW } = metrics(fullWidth, style, scale);
   const edge = Math.max(1, lineW * 0.4);
   ctx.font = `bold ${fontPx}px Arial, Helvetica, sans-serif`;
-  ctx.textAlign = 'center';
+  ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
+  // where the alphabetic baseline and the x-height sit relative to the 'middle' line (for lining maths up with text)
+  const base = ctx.measureText('H').actualBoundingBoxDescent || fontPx * 0.35;
+  const exPx = (ctx.measureText('x').actualBoundingBoxAscent || fontPx * 0.17) + base;
   const boxes = [];
   for (const lb of labels) {
     const cx = lb.x * scale + ox, cy = lb.y * scale + oy;
-    const m = ctx.measureText(lb.text);
-    const asc = m.actualBoundingBoxAscent || fontPx * 0.4;
-    const desc = m.actualBoundingBoxDescent || fontPx * 0.4;
-    const box = [cx - m.width / 2 - pad, cy - asc - pad * 0.6, cx + m.width / 2 + pad, cy + desc + pad * 0.6];
+    const parts = layoutParts(ctx, lb.text, fontPx, base, exPx);
+    const width = parts.reduce((sum, p) => sum + p.w, 0);
+    const asc = Math.max(...parts.map((p) => p.asc));
+    const desc = Math.max(...parts.map((p) => p.desc));
+    const band = lb.stripe ? Math.max(2, fontPx * 0.22) : 0;   // a striped wire: a band of the stripe colour along the top of the box
+    const box = [cx - width / 2 - pad, cy - asc - pad * 0.6 - band, cx + width / 2 + pad, cy + desc + pad * 0.6];
     boxes.push(box);
     const outline = outlineFor(lb.fill);
     if (lb.tip) {
       const side = Math.max(4, (fullWidth * lb.marker) / 100 * scale);
-      drawLeader(ctx, box, cx, cy, lb.tip[0] * scale + ox, lb.tip[1] * scale + oy, side, lineW, edge, lb.fill, outline);
+      drawLeader(ctx, box, cx, cy, lb.tip[0] * scale + ox, lb.tip[1] * scale + oy, side, lineW, edge, lb.fill, outline, lb.stripe);
     }
     roundRect(ctx, box, pad * 0.5);
     ctx.fillStyle = lb.fill; ctx.fill();
+    if (band) {
+      ctx.save(); ctx.clip();
+      ctx.fillStyle = lb.stripe; ctx.fillRect(box[0], box[1], box[2] - box[0], band);
+      ctx.restore();
+      roundRect(ctx, box, pad * 0.5);
+    }
     ctx.lineWidth = edge; ctx.strokeStyle = outline; ctx.stroke();
     ctx.fillStyle = outline;
-    ctx.fillText(lb.text, cx, cy);
+    let x = cx - width / 2;
+    for (const p of parts) {
+      if (p.img) ctx.drawImage(p.img[outline], x, cy + base - p.above, p.w, p.hPx);
+      else ctx.fillText(p.text, x, cy);
+      x += p.w;
+    }
   }
   return boxes;
 }
@@ -180,7 +310,10 @@ const HELP = [
   ['+ / -', 'text size'],
   ['[ / ]', 'square size'],
   ['C / K', 'cycle colours / colour picker'],
+  ['#RRGGBB box', 'type a colour as hex'],
   ['+ button', 'save the current colour as a preset (right-click a custom one to remove)'],
+  ['Pins button', 'AD2 / AD3 pinout: click a pin, then click its wire on the photo; the label takes the wire\'s colour. Each pin goes on a photo once (greyed out while it is there)'],
+  ['$...$', 'maths in a label, typeset with MathJax: 10 k$\\Omega$, $V_{out}$, $\\frac{1}{2}$'],
   ['Shift-click', 'text only, no square'],
   ['R / Shift-R', 'rotate the photo right / left (labels turn with it)'],
 ];
@@ -192,6 +325,7 @@ export class Labeler {
     this.images = [];          // {name, type, key, bitmap, width, height, labels, undo, redo, dirty}
     this.index = -1;
     this.style = Object.assign({ fontPct: 3, markerPct: 2.5, fill: COLOURS[0], format: 'jpg', saveTo: 'folder' }, loadJSON(STYLE_KEY, {}));
+    delete this.style.pins;                                    // an older build remembered the panel being hidden; it is shown on every load now
     if (!['jpg', 'png'].includes(this.style.format)) this.style.format = 'jpg';
     if (!['folder', 'download'].includes(this.style.saveTo)) this.style.saveTo = 'folder';
     this.saved = loadJSON(LABELS_KEY, {});
@@ -200,6 +334,9 @@ export class Labeler {
     this.custom = (loadJSON(PRESETS_KEY, []) || []).filter((c) => /^#[0-9A-F]{6}$/i.test(c)).map((c) => c.toUpperCase());
     this.selected = null;
     this.textOnly = false;
+    this.armed = null;           // a pin {id, label, fill, stripe} picked from the pinout, waiting for a click on the photo
+    // the pinout panel is shown on every load (hidden only on phone-sized screens, where the photo needs the room)
+    this.pinsShown = !(typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 700px)').matches);
     this.press = null; this.mode = null; this.moved = false; this.grab = [0, 0];
     this.rubber = null;
     this.base = null;            // screen-sized copy of the current photo, redrawn from on every refresh
@@ -211,6 +348,7 @@ export class Labeler {
     this.scale = 1; this.offset = [0, 0]; this.boxes = [];
     this.buildDom();
     this.bind();
+    math.listen(() => { if (this.current) this.requestRefresh(); });   // a typeset expression is ready: redraw with it
     this.refresh();
     if (opts.resume !== false) this.checkSession();
   }
@@ -247,16 +385,25 @@ export class Labeler {
         <span class="bbl-group" title="Square size ([ / ])">&#9632; <button data-act="markerDown">&minus;</button><button data-act="markerUp">+</button></span>
         <span class="bbl-swatches"></span>
         <input type="color" class="bbl-colour" title="Any colour (K)">
+        <input class="bbl-hex" maxlength="7" spellcheck="false" autocomplete="off" placeholder="#RRGGBB" title="Type a colour as hex (#RRGGBB); + saves it as a preset">
         <button data-act="addPreset" class="bbl-add" title="Save the current colour as a preset (right-click a custom preset to remove it)">+</button>
         <button data-act="textOnly" class="bbl-toggle" title="Next label: text only, no square (or shift-click)">Text only</button>
+        <button data-act="pins" class="bbl-toggle bbl-pins-btn" title="Show or hide the AD2 / AD3 pinout: click a pin, then click its wire on the photo">Pins</button>
         <button data-act="help" title="Keys">?</button>
       </div>
       <div class="bbl-status">Open some photos to start.</div>
-      <div class="bbl-stage">
-        <canvas class="bbl-canvas"></canvas>
-        <input class="bbl-entry" hidden spellcheck="false">
-        <div class="bbl-drop"><div>Drop photos here, or use Open photos</div><button class="bbl-resume" hidden>Reopen last session</button></div>
-        <div class="bbl-help" hidden>${HELP.map(([k, v]) => `<div><b>${k}</b><span>${v}</span></div>`).join('')}</div>
+      <div class="bbl-body">
+        <div class="bbl-stage">
+          <canvas class="bbl-canvas"></canvas>
+          <input class="bbl-entry" hidden spellcheck="false">
+          <div class="bbl-drop"><div>Drop photos here, or use Open photos</div><button class="bbl-resume" hidden>Reopen last session</button></div>
+          <div class="bbl-help" hidden>${HELP.map(([k, v]) => `<div><b>${k}</b><span>${v}</span></div>`).join('')}</div>
+        </div>
+        <aside class="bbl-pins" hidden aria-label="Analog Discovery pinout">
+          <div class="bbl-pins-head"><b>${AD_PINOUT.name} pins</b><button data-act="pins" title="Hide the pinout">&times;</button></div>
+          <div class="bbl-pins-hint">Click a pin, then click its wire on the photo. The label takes the wire's colour.</div>
+          <div class="bbl-pins-grid"><span class="bbl-pins-col">top row</span><span class="bbl-pins-col">bottom row</span></div>
+        </aside>
       </div>
       <div class="bbl-dialog" hidden role="dialog" aria-modal="true">
         <div class="bbl-dialog-box">
@@ -281,12 +428,92 @@ export class Labeler {
     this.dropEl = c.querySelector('.bbl-drop');
     this.helpEl = c.querySelector('.bbl-help');
     this.colourInput = c.querySelector('.bbl-colour');
+    this.hexInput = c.querySelector('.bbl-hex');
     this.textOnlyBtn = c.querySelector('[data-act=textOnly]');
+    this.pinsEl = c.querySelector('.bbl-pins');
+    this.pinsBtn = c.querySelector('.bbl-pins-btn');
     this.formatSelect = c.querySelector('.bbl-format');
     this.formatSelect.value = this.style.format;
     this.swatchesEl = c.querySelector('.bbl-swatches');
     this.dialogEl = c.querySelector('.bbl-dialog');
     this.renderSwatches();
+    this.renderPins();
+    this.togglePins(this.pinsShown);
+  }
+
+  /** The 2x15 connector as a 15 x 2 grid: left column is the top row of Digilent's drawing, right the bottom row. */
+  renderPins() {
+    const grid = this.pinsEl.querySelector('.bbl-pins-grid');
+    const [top, bottom] = AD_PINOUT.rows;
+    for (let i = 0; i < top.length; i++) {
+      for (const pin of [top[i], bottom[i]]) {
+        const b = document.createElement('button');
+        b.className = 'bbl-pin' + (pin.stripe ? ' bbl-pin-striped' : '');
+        b.textContent = pin.label; b.title = pin.title;
+        b.style.setProperty('--c', pin.fill); b.style.setProperty('--s', pin.stripe || pin.fill); b.style.color = outlineFor(pin.fill);
+        b.dataset.id = pin.id; b.dataset.label = pin.label; b.dataset.fill = pin.fill; b.dataset.stripe = pin.stripe || '';
+        grid.appendChild(b);
+      }
+    }
+  }
+
+  togglePins(show = !this.pinsShown) {
+    this.pinsShown = !!show;
+    this.pinsEl.hidden = !this.pinsShown;
+    this.pinsBtn.classList.toggle('bbl-on', this.pinsShown);
+    if (!this.pinsShown) this.disarm();
+    this.refresh();                               // the photo area changed width
+  }
+
+  /** Ids of the pins already on a photo. A label placed from the panel carries its pin id; a typed label
+   *  counts too when its text and colour are exactly a pin's (one pin per such label). */
+  usedPins(im = this.current) {
+    const used = new Set();
+    if (!im) return used;
+    for (const lb of im.labels) {
+      if (lb.pin) { used.add(lb.pin); continue; }
+      const p = PINS.find((q) => !used.has(q.id) && q.label === lb.text && q.fill === lb.fill && (q.stripe || null) === (lb.stripe || null));
+      if (p) used.add(p.id);
+    }
+    return used;
+  }
+
+  /** A pin was clicked: the next click (or drag) on the photo places a label with that pin's name and wire colour. */
+  armPin(pin) {
+    if (this.armed && this.armed.id === pin.id) { this.disarm(); return; }
+    if (!this.current) { this.flash('Open a photo first.'); return; }
+    if (this.usedPins().has(pin.id)) { this.flash(`${pin.label} is already on this photo.`); return; }
+    this.commitEntry();
+    this.armed = { id: pin.id, label: pin.label, fill: pin.fill, stripe: pin.stripe || null };
+    this.selected = null;
+    this.refresh();
+  }
+  disarm() {
+    if (!this.armed) return;
+    this.armed = null;
+    this.refresh();
+  }
+  /** Panel state from the photo: the armed pin is highlighted, pins already on the photo are greyed out. */
+  updatePins() {
+    const used = this.usedPins();
+    if (this.armed && used.has(this.armed.id)) this.armed = null;   // e.g. Y put its label back while it was armed
+    const a = this.armed;
+    this.stage.classList.toggle('bbl-armed', !!a);
+    for (const b of this.pinsEl.querySelectorAll('.bbl-pin')) {
+      const isUsed = used.has(b.dataset.id);
+      b.classList.toggle('bbl-on', !!a && b.dataset.id === a.id);
+      b.classList.toggle('bbl-pin-used', isUsed);
+      b.disabled = isUsed;
+      b.title = isUsed ? `${b.dataset.label} is already on this photo` : (pinById(b.dataset.id) || {}).title || b.dataset.label;
+    }
+  }
+  placeArmed(pos, tip) {
+    const { id, label, fill, stripe } = this.armed;
+    this.armed = null;
+    this.snapshot();
+    this.current.labels.push({ x: pos[0], y: pos[1], text: label, tip, fill, stripe, marker: this.style.markerPct, pin: id });
+    this.selected = this.current.labels.length - 1;
+    this.changed();
   }
 
   /** Built-in presets followed by the user's own. */
@@ -355,6 +582,18 @@ export class Labeler {
       e.preventDefault(); this.removePreset(b.dataset.colour);
     });
     this.colourInput.addEventListener('input', () => this.applyColour(this.colourInput.value.toUpperCase()));
+    this.hexInput.addEventListener('input', () => {
+      const hex = this.hexInput.value.trim().replace(/^#?/, '#');
+      if (/^#[0-9A-F]{6}$/i.test(hex)) this.applyColour(hex, { refocus: false });
+    });
+    this.hexInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); this.hexInput.blur(); } e.stopPropagation(); });
+    this.hexInput.addEventListener('blur', () => { this.hexInput.value = this.currentColour(); });   // junk left in the box goes back to the real colour
+    this.pinsEl.addEventListener('click', (e) => {
+      const b = e.target.closest('button'); if (!b) return;
+      if (b.dataset.act === 'pins') { this.togglePins(false); return; }
+      const pin = pinById(b.dataset.id);
+      if (pin && !b.disabled) this.armPin(pin);
+    });
     this.formatSelect.addEventListener('change', () => this.setFormat(this.formatSelect.value));
     this.dialogEl.addEventListener('click', (e) => {
       const b = e.target.closest('.bbl-dialog-buttons button');
@@ -392,6 +631,7 @@ export class Labeler {
       textOnly: () => { this.textOnly = !this.textOnly; this.textOnlyBtn.classList.toggle('bbl-on', this.textOnly); },
       help: () => { this.helpEl.hidden = !this.helpEl.hidden; },
       addPreset: () => this.addPreset(),
+      pins: () => this.togglePins(),
     };
     if (map[act]) map[act]();
   }
@@ -791,6 +1031,7 @@ export class Labeler {
   async saveBlob(im = this.current) {
     const { mime } = this.outputName(im);
     await this.ensure(im);
+    await math.ready(im.labels);                 // any $...$ must be typeset before it is burned in
     const cv = this.renderFull(im);
     return new Promise((resolve) => cv.toBlob(resolve, mime, JPEG_QUALITY));
   }
@@ -1058,7 +1299,7 @@ export class Labeler {
     const cw = parseFloat(this.canvas.style.width), ch = parseFloat(this.canvas.style.height);
     ctx.clearRect(0, 0, cw, ch);
     this.dropEl.hidden = !!im;
-    if (!im || !im.bitmap) { this.boxes = []; this.status(); return; }
+    if (!im || !im.bitmap) { this.boxes = []; this.updatePins(); this.status(); return; }
     const dw = im.width * this.scale, dh = im.height * this.scale;
     ctx.drawImage(this.baseFor(im, dw, dh), this.offset[0], this.offset[1], dw, dh);
     this.boxes = drawLabels(ctx, im.labels, im.width, this.style, this.scale, this.offset[0], this.offset[1]);
@@ -1067,8 +1308,9 @@ export class Labeler {
       ctx.save(); ctx.setLineDash([5, 3]); ctx.lineWidth = 2; ctx.strokeStyle = '#00E5FF';
       ctx.strokeRect(x0 - 4, y0 - 4, x1 - x0 + 8, y1 - y0 + 8); ctx.restore();
     }
-    if (this.rubber) this.drawPreview(this.rubber.text, this.rubber.tip, this.style.fill, this.style.markerPct);
+    if (this.rubber) this.drawPreview(this.rubber.text, this.rubber.tip, this.armed ? this.armed.fill : this.style.fill, this.style.markerPct);
     if (this.entry) this.drawPreview(this.entry.disp, this.entry.tipDisp, this.entry.fill, this.style.markerPct);
+    this.updatePins();
     this.status();
   }
   drawPreview(text, tip, fill, markerPct) {
@@ -1090,8 +1332,11 @@ export class Labeler {
     const where = FS_ACCESS && s.saveTo === 'folder' && im.dir ? ' into its folder' : ' to Downloads';
     const rot = im.rotation ? `  ·  rotated ${im.rotation}°` : '';
     const base = `${im.name}${im.dirty ? ' *' : ''}  ·  labels: ${im.labels.length}${sel}${rot}  ·  text ${s.fontPct}%  square ${s.markerPct}%  colour ${s.fill}  ·  saves as ${s.format.toUpperCase()}${where}`;
-    this.statusEl.textContent = extra ? `${extra}   |   ${base}` : base;
-    this.colourInput.value = s.fill;
+    const lead = extra || (this.armed ? `Placing ${this.armed.label}: click its wire on the photo, or drag from the wire to where the text should go. Esc cancels.` : '');
+    this.statusEl.textContent = lead ? `${lead}   |   ${base}` : base;
+    const col = this.currentColour();
+    this.colourInput.value = col;
+    if (document.activeElement !== this.hexInput) this.hexInput.value = col;
   }
   flash(text) {
     this.status(text);
@@ -1144,6 +1389,7 @@ export class Labeler {
     if (moved) { pos = this.toImage(x, y); tip = this.toImage(px, py); }
     else if (this.shift || this.textOnly) { pos = this.toImage(px, py); tip = null; }
     else { tip = this.toImage(px, py); pos = this.defaultTextPos(tip); }
+    if (this.armed) { this.placeArmed(pos, tip); return; }
     this.openEntry(pos, tip, null);
   }
   onDouble(e) {
@@ -1188,7 +1434,7 @@ export class Labeler {
     this.cancelEntry();
     const im = this.current;
     if (editing !== null) {
-      if (text !== im.labels[editing].text) this.snapshot();
+      if (text !== im.labels[editing].text) { this.snapshot(); delete im.labels[editing].pin; }   // renamed: no longer that pin
       if (text) im.labels[editing].text = text;
       else { im.labels.splice(editing, 1); this.selected = null; }
       this.changed();
@@ -1206,7 +1452,7 @@ export class Labeler {
   }
 
   // ---- edits ----------------------------------------------------------- //
-  applyColour(fill) {
+  applyColour(fill, { refocus = true } = {}) {
     fill = fill.toUpperCase();
     if (this.selected !== null && this.current) { this.snapshot(); this.current.labels[this.selected].fill = fill; this.changed(); }
     else { this.style.fill = fill; saveJSON(STYLE_KEY, this.style); this.refresh(); }
@@ -1214,7 +1460,7 @@ export class Labeler {
       // a label is being typed: show the new colour right away, not only after Enter
       this.entry.fill = fill;
       this.entryEl.style.background = fill; this.entryEl.style.color = outlineFor(fill);
-      this.entryEl.focus();
+      if (refocus) this.entryEl.focus();       // not when the colour is being typed into the hex box
       this.refresh();
     }
   }
@@ -1249,6 +1495,7 @@ export class Labeler {
   // ---- keys ------------------------------------------------------------ //
   onKey(e) {
     if (this.entry || e.target === this.entryEl) return;
+    if (e.target instanceof Element && e.target !== document.body && !this.container.contains(e.target)) return;   // aimed at another widget on the page
     if (e.target && e.target.matches && e.target.matches('input, textarea, select')) return;
     if (e.metaKey || e.altKey) return;
     const k = e.key.toLowerCase();
@@ -1262,7 +1509,7 @@ export class Labeler {
       p: () => this.step(-1), arrowleft: () => this.step(-1),
       z: () => (e.ctrlKey && e.shiftKey ? this.redo() : this.undo()), y: () => this.redo(),
       delete: () => this.deleteSelected(), backspace: () => this.deleteSelected(),
-      escape: () => { if (this.selected !== null) { this.selected = null; this.refresh(); } else this.helpEl.hidden = true; },
+      escape: () => { if (this.armed) this.disarm(); else if (this.selected !== null) { this.selected = null; this.refresh(); } else this.helpEl.hidden = true; },
       '+': () => this.adjustFont(0.25), '=': () => this.adjustFont(0.25), '-': () => this.adjustFont(-0.25), '_': () => this.adjustFont(-0.25),
       '[': () => this.adjustMarker(-0.25), ']': () => this.adjustMarker(0.25),
       c: () => this.cycleColour(), k: () => this.colourInput.click(),
