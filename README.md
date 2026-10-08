@@ -21,6 +21,13 @@ it works offline.
    Or **drag** from the part to where the text should go.
 3. **Drag the text** or **the square** to move them. **Click a label** to select it,
    **double-click** to edit its text.
+   **Maths:** put TeX between dollar signs, `10 k$\Omega$` or `$V_{out}$`, and it is typeset with
+   MathJax; the text around it stays as it is. The first such label downloads MathJax (about 2 MB,
+   kept for offline use after that). Until it has rendered, the label shows the raw TeX.
+   **Pins:** the panel on the right is the Analog Discovery 2 / 3 connector in its wire colours.
+   Click a pin, then click its wire on the photo (or drag from the wire to where the text should go):
+   the label is placed at once with the pin's name and the wire's colour, white stripe included.
+   The **Pins** button hides and shows the panel.
    The **↺ / ↻** buttons (or R / Shift-R) **rotate the photo** in 90° steps. Labels turn with it and stay
    on their parts; the saved copy comes out rotated. Undo turns it back.
 4. **Save** writes `name_labeled.jpg` and moves to the next photo. **Save all** does every
@@ -61,9 +68,11 @@ restores them. Undo, redo, text size, square size and colour are all in the tool
 | [ / ] | smaller / bigger square |
 | C | cycle preset colours: yellow, orange, blue, pink, green, brown, red, white, light grey, black, then your own |
 | K | pick any colour |
+| #RRGGBB box | type a colour as hex (next to the colour picker); + then saves it as a preset |
 | + (toolbar) | save the current colour as a preset; right-click a custom preset to remove it |
 | Shift-click | text-only label, no square (the "Text only" button does the same on touch screens) |
 | R / Shift-R | rotate the photo right / left by 90° (labels turn with it) |
+| Pins | show / hide the AD2 / AD3 pinout panel; Esc cancels a pin you have picked |
 | ? | show this list in the app |
 
 **Colours and square size:** with a label selected (click its text), C, K, [ and ] change that one
@@ -87,6 +96,12 @@ you can chain click, type, click, type without pressing Enter.
   (libheif 1.22, including the 10-bit HDR files newer iPhones shoot), downloaded the first time one
   is opened (about 3 MB) and cached for offline use after that.
 - Files whose names end in `_labeled`, `_labeled_2`, ... are treated as earlier outputs and skipped.
+- The pinout (`docs/pinouts.js`) follows Digilent's Analog Discovery pin-out sheet: top row
+  1+ 2+ GND V+ W1 GND T1 DIO 0-7, bottom row 1- 2- GND V- W2 GND T2 DIO 8-15, with the bottom-row
+  wires white-striped. The AD2 and AD3 use the same header and the same flywire harness.
+- Maths is typeset by [MathJax](https://www.mathjax.org/) 3 (TeX to SVG), loaded from jsdelivr the
+  first time a label contains `$...$` and cached by the service worker like the HEIC decoder. Each
+  expression is rendered once to an SVG image and drawn into the label at the text's x-height.
 
 ## Browser support
 

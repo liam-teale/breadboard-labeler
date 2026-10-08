@@ -18,7 +18,8 @@
     window.addEventListener('unhandledrejection', (e) => { document.getElementById('results').textContent = 'FAIL unhandled rejection: ' + (e.reason && e.reason.stack || e.reason) + '\n\nFAILURES: 1'; document.title = 'DONE'; });
   </script>
   <script type="module">
-    import { Labeler, drawLabels, outlineFor, COLOURS, isImageFile, isHeic, FS_ACCESS, CACHE_MAX_AGE } from '../docs/app.js';
+    import { Labeler, drawLabels, outlineFor, COLOURS, isImageFile, isHeic, FS_ACCESS, CACHE_MAX_AGE, splitMath, math } from '../docs/app.js';
+    import { AD_PINOUT } from '../docs/pinouts.js';
 
     const out = [];
     let fails = 0;
@@ -84,7 +85,8 @@
       const labelDisp = (i) => app.toDisplay(app.current.labels[i].x, app.current.labels[i].y);
       const clickLabel = (i) => { const p = labelDisp(i); ptr('pointerdown', p); ptr('pointerup', p); };
       const dragLabel = (i, fx1, fy1) => drag(labelDisp(i), disp(fx1, fy1));
-      const key = (k, extra = {}) => document.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, ...extra }));
+      // keys are sent to this instance's container (they bubble to the document listener), so other instances on the page do not react
+      const key = (k, extra = {}) => app.container.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, ...extra }));
       const type = (text) => {
         check(!!app.entry, `entry opened for '${text}'`);
         app.entryEl.value = text;
@@ -339,7 +341,7 @@
         const dR = cvR.getContext('2d'); dR.fillStyle = '#00FF00'; dR.fillRect(0, 0, 40, 40);
         const fR = await toFile(cvR, 'IMG_0050.png', 'image/png');
         await appR.openFiles([fR]); await tick();
-        const keyR = (k, extra = {}) => document.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...extra }));
+        const keyR = (k, extra = {}) => appR.container.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...extra }));
         const at = (lb) => [lb.x, lb.y, ...(lb.tip || [])].map(Math.round).join();
         check(!!appR.container.querySelector('[data-act=rotateRight]') && !!appR.container.querySelector('[data-act=rotateLeft]'), 'rotate buttons in the toolbar');
         check(appR.current.rotation === 0 && appR.current.width === 400 && appR.current.height === 300, 'photo starts unrotated');
@@ -414,7 +416,7 @@
         for (let i = 0; i < 3; i++) fD.push(await toFile(makeBoard(300, 200), `d${i}.png`, 'image/png'));
         await appD.openFiles(fD); await appD.whenCached(); await tick();
         const namesD = () => appD.images.map((i) => i.name).join();
-        const keyD = (k, extra = {}) => document.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...extra }));
+        const keyD = (k, extra = {}) => appD.container.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...extra }));
         const btns = () => [...appD.dialogEl.querySelectorAll('.bbl-dialog-buttons button')];
         const btn = (re) => btns().find((b) => re.test(b.textContent));
         const cacheHas = async (im) => { try { await (await (await navigator.storage.getDirectory()).getDirectoryHandle('cache')).getFileHandle(im.cacheName); return true; } catch { return false; } };
@@ -472,6 +474,133 @@
         keyD('d'); await tick(100);
         check(namesD() === 'd0.png,d1.png' && appD.index === 1 && appD.current.name === 'd1.png', `D removes the last photo and steps back: ${namesD()} @ ${appD.index}`);
         appD.container.remove();
+      }
+
+      // ---- hex colour box next to the picker -------------------------------------
+      {
+        app.applyColour(COLOURS[0]);
+        const hex = app.container.querySelector('.bbl-hex');
+        check(!!hex && hex.previousElementSibling === app.colourInput && hex.nextElementSibling === app.container.querySelector('[data-act=addPreset]'), 'hex box sits between the colour picker and the + button');
+        const typeHex = (v) => { hex.focus(); hex.value = v; hex.dispatchEvent(new Event('input', { bubbles: true })); };
+        typeHex('#12ab'); check(app.style.fill === COLOURS[0], 'a partial hex changes nothing');
+        typeHex('#12ab34'); check(app.style.fill === '#12AB34' && app.colourInput.value === '#12ab34', `a full hex applies the colour and the picker follows (${app.style.fill})`);
+        typeHex('3f51b5'); check(app.style.fill === '#3F51B5', 'the # is optional');
+        hex.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        check(document.activeElement !== hex && app.style.fill === '#3F51B5' && app.index === 0, 'Enter leaves the box, keeps the colour, and does not reach the app keys');
+        app.action('addPreset'); check(app.custom.includes('#3F51B5'), '+ saves the typed colour as a preset');
+        app.removePreset('#3F51B5');
+        click(0.15, 0.80); typeHex('#00ff00');
+        check(!!app.entry && app.entry.fill === '#00FF00' && document.activeElement === hex, 'typing a hex while a label is being typed recolours it without stealing focus');
+        app.entryEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        typeHex('zz'); hex.blur(); hex.dispatchEvent(new Event('blur'));     // headless Chrome has no window focus, so blur() alone fires no event
+        check(hex.value === '#00FF00', `leaving the box with junk in it shows the current colour again (${hex.value})`);
+        clickLabel(0);
+        check(hex.value === app.current.labels[0].fill && app.colourInput.value.toUpperCase() === app.current.labels[0].fill, 'with a label selected the box shows that label\'s colour');
+        key('Escape'); check(app.selected === null, 'Esc clears the selection');
+        app.applyColour(COLOURS[0]);
+      }
+
+      // ---- pins panel: AD2 / AD3 pinout, click a pin then the photo ---------------
+      {
+        const panel = app.container.querySelector('.bbl-pins');
+        const pins = () => [...panel.querySelectorAll('.bbl-pin')];
+        const pin = (label, striped = false) => pins().find((b) => b.textContent === label && b.classList.contains('bbl-pin-striped') === striped);
+        const colourOf = (b) => b.style.getPropertyValue('--c').trim();
+        check(AD_PINOUT.rows.length === 2 && AD_PINOUT.rows.every((r) => r.length === 15), 'pinout data is 2 x 15');
+        check(!panel.hidden && pins().length === 30 && app.pinsBtn.classList.contains('bbl-on'), `pins panel shown by default with 30 pins (${pins().length})`);
+        check(panel.getBoundingClientRect().left >= app.stage.getBoundingClientRect().right - 1 && panel.getBoundingClientRect().height > 300, 'panel sits to the right of the photo');
+        const order = pins().map((b) => b.textContent);
+        check(order.slice(0, 6).join() === '1+,1-,2+,2-,GND,GND' && order.slice(6, 14).join() === 'V+,V-,W1,W2,GND,GND,T1,T2' && order[14] === 'DIO 0' && order[15] === 'DIO 8' && order[28] === 'DIO 7' && order[29] === 'DIO 15',
+          `grid mirrors the connector rows (left column = top row): ${order.join(' ')}`);
+        check(colourOf(pin('1+')) === '#FF9800' && colourOf(pin('1-', true)) === '#FF9800' && colourOf(pin('2+')) === '#2962FF' && colourOf(pin('2-', true)) === '#2962FF' && colourOf(pin('W1')) === '#FFEB3B' && colourOf(pin('W2', true)) === '#FFEB3B',
+          'wire colours: orange scope 1, blue scope 2, yellow wavegen, stripes on the negatives and W2');
+        check(colourOf(pin('V+')) === '#FF3B30' && colourOf(pin('V-')) === '#FFFFFF' && colourOf(pin('GND')) === '#000000' && colourOf(pin('T1')) === colourOf(pin('T2', true)), 'red V+, white V-, black ground, grey triggers');
+        check(colourOf(pin('DIO 0')) === colourOf(pin('DIO 4')) && colourOf(pin('DIO 1')) === colourOf(pin('DIO 9', true)) && colourOf(pin('DIO 3')) === '#8D5524' && colourOf(pin('DIO 0')) === '#FF66CC', 'DIO wires cycle pink, green, purple, brown; 8-15 striped');
+        check(pins().filter((b) => b.classList.contains('bbl-pin-striped')).length === 12, 'exactly the 12 white-striped wires are drawn striped');
+        check(pin('GND').style.color === 'rgb(255, 255, 255)' && pin('W1').style.color === 'rgb(0, 0, 0)', 'pin text is white on dark wires, black on light ones');
+        check(pin('1+').title.includes('Scope channel 1') && pin('1+').title.includes('orange'), `tooltips name the signal and wire: "${pin('1+').title}"`);
+        const n0 = app.current.labels.length;
+        pin('1+').click();
+        check(app.armed && app.armed.label === '1+' && pin('1+').classList.contains('bbl-on') && app.stage.classList.contains('bbl-armed') && app.statusEl.textContent.startsWith('Placing 1+'), 'clicking a pin arms it and the status says so');
+        click(0.30, 0.65);
+        let lb = app.current.labels.at(-1);
+        check(app.current.labels.length === n0 + 1 && !app.entry && lb.text === '1+' && lb.fill === '#FF9800' && !lb.stripe && near(lb.tip[0], 0.30 * 4000) && lb.marker === app.style.markerPct,
+          `clicking the photo places the pin label straight away: ${lb.text} ${lb.fill}`);
+        check(!app.armed && !pin('1+').classList.contains('bbl-on') && app.selected === n0 && app.current.dirty, 'then disarms, with the new label selected');
+        check(app.style.fill === COLOURS[0], `the default colour for typed labels is untouched (${app.style.fill})`);
+        pin('1-', true).click(); dragF(0.30, 0.72, 0.45, 0.82);
+        lb = app.current.labels.at(-1);
+        check(lb.text === '1-' && lb.fill === '#FF9800' && lb.stripe === '#FFFFFF' && near(lb.x, 0.45 * 4000) && near(lb.tip[0], 0.30 * 4000), 'a striped pin places a striped label; a drag puts the text at the release point');
+        const fullS = app.renderFull();
+        const bS = drawLabels(document.createElement('canvas').getContext('2d'), app.current.labels, 4000, app.style, 1).at(-1);
+        check(px(fullS, (bS[0] + bS[2]) / 2, bS[1] + 6) === '#FFFFFF' && px(fullS, bS[0] + 8, (bS[1] + bS[3]) / 2 + 8) === '#FF9800',
+          `striped label: white band along the top of an orange box (${px(fullS, (bS[0] + bS[2]) / 2, bS[1] + 6)}, ${px(fullS, bS[0] + 8, (bS[1] + bS[3]) / 2 + 8)})`);
+        check(px(fullS, lb.tip[0], lb.tip[1]) === '#FFFFFF' && px(fullS, lb.tip[0] - 35, lb.tip[1]) === '#FF9800', 'striped square: white diagonal across an orange square');
+        check(JSON.parse(localStorage.getItem('bbl.labels'))[app.current.key].at(-1).stripe === '#FFFFFF', 'the stripe is persisted with the label');
+        pin('W1').click(); check(!!app.armed, 'armed'); key('Escape'); check(!app.armed && !pin('W1').classList.contains('bbl-on'), 'Esc disarms');
+        pin('W1').click(); pin('W1').click(); check(!app.armed, 'clicking the armed pin again disarms');
+        pin('W1').click(); pin('2+').click(); check(app.armed && app.armed.label === '2+' && !pin('W1').classList.contains('bbl-on') && pin('2+').classList.contains('bbl-on'), 'clicking another pin re-arms');
+        key('Escape'); click(0.60, 0.80); app.entryEl.value = 'typed'; pin('GND').click();
+        check(!app.entry && app.current.labels.at(-1).text === 'typed' && app.armed && app.armed.label === 'GND', 'arming a pin places the label being typed first');
+        key('Escape');
+        const stageW = app.stage.getBoundingClientRect().width;
+        app.action('pins');
+        check(panel.hidden && !app.style.pins && !app.pinsBtn.classList.contains('bbl-on') && app.stage.getBoundingClientRect().width > stageW + 100 && JSON.parse(localStorage.getItem('bbl.style')).pins === false, 'Pins button hides the panel, the photo gets the room, and the choice is remembered');
+        app.action('pins'); check(!panel.hidden && app.style.pins, 'and shows it again');
+        panel.querySelector('.bbl-pins-head button').click(); check(panel.hidden, 'the x in the panel hides it too');
+        app.action('pins');
+        key('z'); key('z'); key('z');
+        check(app.current.labels.length === n0, `Z undoes pin placements like any other label (${app.current.labels.length} vs ${n0})`);
+        app.load(0); await tick(100);
+      }
+
+      // ---- maths: $...$ in a label is typeset with MathJax --------------------------
+      {
+        check(JSON.stringify(splitMath('10 k$\\Omega$ pull-up')) === JSON.stringify([{ text: '10 k' }, { tex: '\\Omega' }, { text: ' pull-up' }]), 'splitMath separates text and TeX');
+        check(JSON.stringify(splitMath('plain $5')) === JSON.stringify([{ text: 'plain $5' }]) && JSON.stringify(splitMath('$$')) === JSON.stringify([{ text: '$$' }]), 'a lone $ or an empty $$ stays text');
+        check(JSON.stringify(splitMath('\\(V_{out}\\)')) === JSON.stringify([{ tex: 'V_{out}' }]), '\\( ... \\) works too');
+        check(JSON.stringify(splitMath('R1 10k')) === JSON.stringify([{ text: 'R1 10k' }]), 'plain text is one part');
+        const n0 = app.current.labels.length;
+        click(0.20, 0.85); type('$V_{out}$ 3.3 V');
+        const lb = app.current.labels.at(-1);
+        check(lb.text === '$V_{out}$ 3.3 V', 'the label keeps the raw TeX');
+        const e = math.cache.get('V_{out}');
+        check(!!e && e.status === 'pending', 'drawing a maths label starts typesetting it');
+        const ctxM = document.createElement('canvas').getContext('2d');
+        const boxRaw = drawLabels(ctxM, [lb], 4000, app.style, 1)[0];
+        const rawRender = app.renderFull();
+        const t0 = performance.now();
+        await math.ready([lb]);
+        check(e.status === 'ready' && e.w > 0 && e.h > 0 && e.depth > 0 && e.imgs['#000000'].naturalWidth > 0, `MathJax typeset it in ${Math.round(performance.now() - t0)} ms (${e.w.toFixed(2)} ex wide, ${e.h.toFixed(2)} ex tall, depth ${e.depth.toFixed(2)} ex)${e.error ? ': ' + e.error.message : ''}`);
+        const boxM = drawLabels(ctxM, [lb], 4000, app.style, 1)[0];
+        check(Math.abs((boxM[2] - boxM[0]) - (boxRaw[2] - boxRaw[0])) > 10, `the box is laid out around the typeset maths (${Math.round(boxRaw[2] - boxRaw[0])} -> ${Math.round(boxM[2] - boxM[0])} px wide)`);
+        const fullM = app.renderFull();
+        const region = (cv) => cv.getContext('2d').getImageData(Math.round(boxM[0]), Math.round(Math.min(boxM[1], boxRaw[1])), Math.round(Math.max(boxM[2], boxRaw[2]) - boxM[0]), Math.round(Math.max(boxM[3], boxRaw[3]) - Math.min(boxM[1], boxRaw[1]))).data;
+        const a = region(rawRender), b = region(fullM);
+        let diff = 0; for (let i = 0; i < a.length; i += 4) if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 60) diff++;
+        check(diff > 500, `the typeset maths replaces the raw TeX in the saved photo (${diff} pixels changed)`);
+        let dark = 0; for (let i = 0; i < b.length; i += 4) if (b[i] < 50 && b[i + 1] < 50 && b[i + 2] < 50) dark++;
+        check(dark > 300, `glyphs are drawn in the text colour inside the box (${dark} dark pixels)`);
+        check(fullM.toDataURL().length > 100, 'the canvas is not tainted by the SVG images');
+        const blobM = await app.saveBlob();
+        check(blobM && blobM.size > 1000, 'saving waits for the typesetting and makes a file');
+        // a second label with the same expression reuses the cache; a different one renders on its own
+        const sameE = math.get('V_{out}'); check(sameE === e, 'an expression is typeset once and shared');
+        app.current.labels.push({ x: 2000, y: 2000, text: 'R = 10 k$\\Omega$', tip: null, fill: '#2962FF', marker: 2.5 });
+        app.refresh();
+        await math.ready(app.current.labels);
+        check(math.cache.get('\\Omega').status === 'ready' && math.cache.get('\\Omega').imgs['#FFFFFF'].naturalWidth > 0, 'white glyphs are ready for dark boxes');
+        app.current.labels.pop();
+        let notified = 0; const unsub = () => notified++; math.listen(unsub);
+        app.current.labels.push({ x: 2000, y: 2200, text: '$\\frac{1}{2}$', tip: null, fill: '#FFEB3B', marker: 2.5 });
+        app.refresh();
+        await math.ready(app.current.labels);
+        check(notified >= 1, 'listeners are told when a new expression is ready, so the photo redraws');
+        math.listeners.delete(unsub);
+        app.current.labels.pop();
+        key('Escape'); key('z');
+        check(app.current.labels.length === n0, 'cleanup');
+        app.persist(); app.refresh();
       }
 
       // screenshot state for a visual check
