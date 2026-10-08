@@ -193,26 +193,19 @@ function roundRect(ctx, [x0, y0, x1, y1], r) {
   ctx.closePath();
 }
 
-function drawLeader(ctx, box, cx, cy, tx, ty, side, lineW, edge, fill, outline, stripe = null) {
+/** The line from the text box to the square, then the square. Drawn centre to centre, before the box
+ *  and the square are painted on top, so both ends are always hidden under them whatever the angle. */
+function drawLeader(ctx, cx, cy, tx, ty, side, lineW, edge, fill, outline, stripe = null) {
   const half = side / 2;
-  const dx = tx - cx, dy = ty - cy;
-  const dist = Math.hypot(dx, dy);
-  if (dist >= 1) {
-    const halfW = (box[2] - box[0]) / 2, halfH = (box[3] - box[1]) / 2;
-    const t0 = Math.min(dx ? halfW / Math.abs(dx) : Infinity, dy ? halfH / Math.abs(dy) : Infinity, 1);
-    const sx = cx + dx * t0, sy = cy + dy * t0;
-    const t1 = Math.min(dx ? half / Math.abs(dx) : Infinity, dy ? half / Math.abs(dy) : Infinity, 1);
-    const ex = tx - dx * t1, ey = ty - dy * t1;
-    if (Math.hypot(ex - sx, ey - sy) > lineW) {
-      ctx.lineCap = 'butt';
-      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey);
-      ctx.lineWidth = lineW + 2 * edge; ctx.strokeStyle = outline; ctx.stroke();
-      ctx.lineWidth = lineW; ctx.strokeStyle = fill; ctx.stroke();
-      if (stripe) {                                            // a striped wire: dashes down the middle of the line
-        ctx.save(); ctx.setLineDash([lineW * 1.5, lineW * 1.5]);
-        ctx.lineWidth = lineW * 0.5; ctx.strokeStyle = stripe; ctx.stroke();
-        ctx.restore();
-      }
+  if (Math.hypot(tx - cx, ty - cy) >= 1) {
+    ctx.lineCap = 'butt';
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(tx, ty);
+    ctx.lineWidth = lineW + 2 * edge; ctx.strokeStyle = outline; ctx.stroke();
+    ctx.lineWidth = lineW; ctx.strokeStyle = fill; ctx.stroke();
+    if (stripe) {                                              // a striped wire: dashes down the middle of the line
+      ctx.save(); ctx.setLineDash([lineW * 1.5, lineW * 1.5]);
+      ctx.lineWidth = lineW * 0.5; ctx.strokeStyle = stripe; ctx.stroke();
+      ctx.restore();
     }
   }
   ctx.fillStyle = fill;
@@ -251,7 +244,7 @@ export function drawLabels(ctx, labels, fullWidth, style, scale, ox = 0, oy = 0)
     const outline = outlineFor(lb.fill);
     if (lb.tip) {
       const side = Math.max(4, (fullWidth * lb.marker) / 100 * scale);
-      drawLeader(ctx, box, cx, cy, lb.tip[0] * scale + ox, lb.tip[1] * scale + oy, side, lineW, edge, lb.fill, outline, lb.stripe);
+      drawLeader(ctx, cx, cy, lb.tip[0] * scale + ox, lb.tip[1] * scale + oy, side, lineW, edge, lb.fill, outline, lb.stripe);
     }
     roundRect(ctx, box, pad * 0.5);
     ctx.fillStyle = lb.fill; ctx.fill();
