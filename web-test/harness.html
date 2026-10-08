@@ -19,7 +19,7 @@
   </script>
   <script type="module">
     import { Labeler, drawLabels, outlineFor, COLOURS, isImageFile, isHeic, FS_ACCESS, CACHE_MAX_AGE, splitMath, math } from '../docs/app.js';
-    import { AD_PINOUT } from '../docs/pinouts.js';
+    import { AD_PINOUT, PINS, pinById } from '../docs/pinouts.js';
 
     const out = [];
     let fails = 0;
@@ -506,7 +506,9 @@
         const pins = () => [...panel.querySelectorAll('.bbl-pin')];
         const pin = (label, striped = false) => pins().find((b) => b.textContent === label && b.classList.contains('bbl-pin-striped') === striped);
         const colourOf = (b) => b.style.getPropertyValue('--c').trim();
-        check(AD_PINOUT.rows.length === 2 && AD_PINOUT.rows.every((r) => r.length === 15), 'pinout data is 2 x 15');
+        check(AD_PINOUT.rows.length === 2 && AD_PINOUT.rows.every((r) => r.length === 15) && PINS.length === 30, 'pinout data is 2 x 15');
+        check(new Set(PINS.map((p) => p.id)).size === 30 && pinById('1+').label === '1+' && PINS.filter((p) => p.label === 'GND').map((p) => p.id).join() === 'GND,GND#2,GND#3,GND#4', 'every pin has a unique id; the grounds are numbered');
+        const used = () => pins().filter((b) => b.disabled).map((b) => b.dataset.id).join();
         check(!panel.hidden && pins().length === 30 && app.pinsBtn.classList.contains('bbl-on'), `pins panel shown by default with 30 pins (${pins().length})`);
         check(panel.getBoundingClientRect().left >= app.stage.getBoundingClientRect().right - 1 && panel.getBoundingClientRect().height > 300, 'panel sits to the right of the photo');
         const order = pins().map((b) => b.textContent);
@@ -524,13 +526,17 @@
         check(app.armed && app.armed.label === '1+' && pin('1+').classList.contains('bbl-on') && app.stage.classList.contains('bbl-armed') && app.statusEl.textContent.startsWith('Placing 1+'), 'clicking a pin arms it and the status says so');
         click(0.30, 0.65);
         let lb = app.current.labels.at(-1);
-        check(app.current.labels.length === n0 + 1 && !app.entry && lb.text === '1+' && lb.fill === '#FF9800' && !lb.stripe && near(lb.tip[0], 0.30 * 4000) && lb.marker === app.style.markerPct,
-          `clicking the photo places the pin label straight away: ${lb.text} ${lb.fill}`);
+        check(app.current.labels.length === n0 + 1 && !app.entry && lb.text === '1+' && lb.fill === '#FF9800' && !lb.stripe && near(lb.tip[0], 0.30 * 4000) && lb.marker === app.style.markerPct && lb.pin === '1+',
+          `clicking the photo places the pin label straight away: ${lb.text} ${lb.fill} (pin ${lb.pin})`);
+        check(used() === '1+' && pin('1+').classList.contains('bbl-pin-used') && pin('1+').title.includes('already'), `the placed pin is greyed out in the panel (${used()})`);
+        pin('1+').click(); check(!app.armed, 'a greyed-out pin cannot be picked');
+        app.armPin(pinById('1+')); check(!app.armed && app.statusEl.textContent.includes('already on this photo'), 'nor armed by other means');
         check(!app.armed && !pin('1+').classList.contains('bbl-on') && app.selected === n0 && app.current.dirty, 'then disarms, with the new label selected');
         check(app.style.fill === COLOURS[0], `the default colour for typed labels is untouched (${app.style.fill})`);
         pin('1-', true).click(); dragF(0.30, 0.72, 0.45, 0.82);
         lb = app.current.labels.at(-1);
         check(lb.text === '1-' && lb.fill === '#FF9800' && lb.stripe === '#FFFFFF' && near(lb.x, 0.45 * 4000) && near(lb.tip[0], 0.30 * 4000), 'a striped pin places a striped label; a drag puts the text at the release point');
+        check(used() === '1+,1-', `both placed pins are greyed out (${used()})`);
         const fullS = app.renderFull();
         const bS = drawLabels(document.createElement('canvas').getContext('2d'), app.current.labels, 4000, app.style, 1).at(-1);
         check(px(fullS, (bS[0] + bS[2]) / 2, bS[1] + 6) === '#FFFFFF' && px(fullS, bS[0] + 8, (bS[1] + bS[3]) / 2 + 8) === '#FF9800',
@@ -543,14 +549,38 @@
         key('Escape'); click(0.60, 0.80); app.entryEl.value = 'typed'; pin('GND').click();
         check(!app.entry && app.current.labels.at(-1).text === 'typed' && app.armed && app.armed.label === 'GND', 'arming a pin places the label being typed first');
         key('Escape');
+        // one of each pin: the four grounds are separate pins; a typed label that matches a pin counts too
+        pin('GND').click(); click(0.90, 0.90);
+        check(used() === '1+,1-,GND' && pins().filter((b) => b.textContent === 'GND' && !b.disabled).length === 3, `placing one GND greys out one GND button (${used()})`);
+        const g2 = pins().find((b) => b.textContent === 'GND' && !b.disabled); g2.click(); click(0.92, 0.95);
+        check(used() === `1+,1-,GND,${g2.dataset.id}` && g2.dataset.id !== 'GND' && app.current.labels.at(-1).pin === g2.dataset.id, `a second ground takes that button's own id (${app.current.labels.at(-1).pin})`);
+        app.current.labels.push({ x: 1000, y: 2500, text: '2+', tip: null, fill: '#2962FF', marker: 2.5 }); app.refresh();
+        check(pin('2+').disabled, 'a typed label with a pin\'s exact text and colour counts as that pin');
+        app.current.labels.pop(); app.refresh();
+        check(!pin('2+').disabled, 'and frees it when it goes');
+        app.selected = app.current.labels.findIndex((l) => l.pin === '1+'); app.deleteSelected();
+        check(!pin('1+').disabled && used() === `1-,GND,${g2.dataset.id}`, `deleting the label brings the pin back (${used()})`);
+        key('z'); check(pin('1+').disabled, 'Z puts it back and greys the pin again');
+        const i1m = app.current.labels.findIndex((l) => l.pin === '1-');
+        app.openEntry([app.current.labels[i1m].x, app.current.labels[i1m].y], app.current.labels[i1m].tip, i1m); app.entryEl.value = '1- (probe)';
+        app.entryEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        check(!pin('1-', true).disabled && app.current.labels[i1m].pin === undefined && app.current.labels[i1m].stripe === '#FFFFFF', 'renaming a pin label frees the pin (the label keeps its colour and stripe)');
+        key('Escape');
+        await app.load(1); await tick(100);
+        check(used() === '' && pins().every((b) => !b.disabled), 'the next photo has all its pins free');
+        await app.load(0); await tick(100);
+        check(used() === `1+,GND,${g2.dataset.id}`, `coming back restores the greyed pins (${used()})`);
         const stageW = app.stage.getBoundingClientRect().width;
         app.action('pins');
-        check(panel.hidden && !app.style.pins && !app.pinsBtn.classList.contains('bbl-on') && app.stage.getBoundingClientRect().width > stageW + 100 && JSON.parse(localStorage.getItem('bbl.style')).pins === false, 'Pins button hides the panel, the photo gets the room, and the choice is remembered');
-        app.action('pins'); check(!panel.hidden && app.style.pins, 'and shows it again');
+        check(panel.hidden && !app.pinsShown && !app.pinsBtn.classList.contains('bbl-on') && app.stage.getBoundingClientRect().width > stageW + 100, 'Pins button hides the panel and the photo gets the room');
+        app.action('pins'); check(!panel.hidden && app.pinsShown, 'and shows it again');
         panel.querySelector('.bbl-pins-head button').click(); check(panel.hidden, 'the x in the panel hides it too');
+        const appP = new Labeler(document.createElement('div'), { resume: false });
+        check(!appP.pinsEl.hidden && appP.pinsShown && !('pins' in appP.style), 'a fresh load shows the panel again: hiding it is not remembered');
+        appP.container.remove();
         app.action('pins');
-        key('z'); key('z'); key('z');
-        check(app.current.labels.length === n0, `Z undoes pin placements like any other label (${app.current.labels.length} vs ${n0})`);
+        while (app.current.labels.length > n0 && app.current.undo.length) key('z');
+        check(app.current.labels.length === n0 && used() === '', `Z undoes pin placements like any other label, freeing the pins (${app.current.labels.length} vs ${n0})`);
         app.load(0); await tick(100);
       }
 

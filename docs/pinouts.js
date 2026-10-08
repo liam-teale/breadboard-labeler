@@ -3,6 +3,8 @@
 // rows[0] is the top row of the connector as Digilent draws it (1+ 2+ GND V+ W1 GND T1 DIO 0-7),
 // rows[1] the bottom row (1- 2- GND V- W2 GND T2 DIO 8-15), left to right. Wires on the bottom
 // row carry a white stripe (except V-, which is plain white, and the grounds, which are black).
+// Every pin has an id: its label, or label#n for the repeated grounds (GND, GND#2, GND#3, GND#4).
+// A label placed from the panel records the id as `pin`, so each pin can be on a photo only once.
 
 export const WIRE = {
   orange: '#FF9800', blue: '#2962FF', yellow: '#FFEB3B', red: '#FF3B30', white: '#FFFFFF', black: '#000000',
@@ -28,3 +30,17 @@ export const AD_PINOUT = {
       pin('T2', 'Trigger 2', 'gray', true), ...[8, 9, 10, 11, 12, 13, 14, 15].map((n) => dio(n, true))],
   ],
 };
+
+/** Every pin in one list, with ids. */
+export const PINS = [];
+{
+  const seen = {};
+  for (const row of AD_PINOUT.rows) {
+    for (const p of row) {
+      seen[p.label] = (seen[p.label] || 0) + 1;
+      p.id = seen[p.label] > 1 ? `${p.label}#${seen[p.label]}` : p.label;
+      PINS.push(p);
+    }
+  }
+}
+export function pinById(id) { return PINS.find((p) => p.id === id) || null; }

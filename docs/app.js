@@ -4,7 +4,7 @@
 // never leave the device, and the original files are never modified: saving
 // always downloads a new *_labeled copy.
 
-import { AD_PINOUT } from './pinouts.js';
+import { AD_PINOUT, PINS, pinById } from './pinouts.js';
 
 // Presets follow the Analog Discovery (WaveForms) channel colours the group uses:
 // yellow, orange, blue, pink, green, brown, then red, white, light grey, black.
@@ -312,7 +312,7 @@ const HELP = [
   ['C / K', 'cycle colours / colour picker'],
   ['#RRGGBB box', 'type a colour as hex'],
   ['+ button', 'save the current colour as a preset (right-click a custom one to remove)'],
-  ['Pins button', 'AD2 / AD3 pinout: click a pin, then click its wire on the photo; the label takes the wire\'s colour'],
+  ['Pins button', 'AD2 / AD3 pinout: click a pin, then click its wire on the photo; the label takes the wire\'s colour. Each pin goes on a photo once (greyed out while it is there)'],
   ['$...$', 'maths in a label, typeset with MathJax: 10 k$\\Omega$, $V_{out}$, $\\frac{1}{2}$'],
   ['Shift-click', 'text only, no square'],
   ['R / Shift-R', 'rotate the photo right / left (labels turn with it)'],
@@ -324,7 +324,8 @@ export class Labeler {
     this.opts = opts;
     this.images = [];          // {name, type, key, bitmap, width, height, labels, undo, redo, dirty}
     this.index = -1;
-    this.style = Object.assign({ fontPct: 3, markerPct: 2.5, fill: COLOURS[0], format: 'jpg', saveTo: 'folder', pins: true }, loadJSON(STYLE_KEY, {}));
+    this.style = Object.assign({ fontPct: 3, markerPct: 2.5, fill: COLOURS[0], format: 'jpg', saveTo: 'folder' }, loadJSON(STYLE_KEY, {}));
+    delete this.style.pins;                                    // an older build remembered the panel being hidden; it is shown on every load now
     if (!['jpg', 'png'].includes(this.style.format)) this.style.format = 'jpg';
     if (!['folder', 'download'].includes(this.style.saveTo)) this.style.saveTo = 'folder';
     this.saved = loadJSON(LABELS_KEY, {});
@@ -333,7 +334,9 @@ export class Labeler {
     this.custom = (loadJSON(PRESETS_KEY, []) || []).filter((c) => /^#[0-9A-F]{6}$/i.test(c)).map((c) => c.toUpperCase());
     this.selected = null;
     this.textOnly = false;
-    this.armed = null;           // {label, fill, stripe}: a pin picked from the pinout, waiting for a click on the photo
+    this.armed = null;           // a pin {id, label, fill, stripe} picked from the pinout, waiting for a click on the photo
+    // the pinout panel is shown on every load (hidden only on phone-sized screens, where the photo needs the room)
+    this.pinsShown = !(typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 700px)').matches);
     this.press = null; this.mode = null; this.moved = false; this.grab = [0, 0];
     this.rubber = null;
     this.base = null;            // screen-sized copy of the current photo, redrawn from on every refresh
@@ -435,7 +438,7 @@ export class Labeler {
     this.dialogEl = c.querySelector('.bbl-dialog');
     this.renderSwatches();
     this.renderPins();
-    this.togglePins(this.style.pins);
+    this.togglePins(this.pinsShown);
   }
 
   /** The 2x15 connector as a 15 x 2 grid: left column is the top row of Digilent's drawing, right the bottom row. */
@@ -448,48 +451,67 @@ export class Labeler {
         b.className = 'bbl-pin' + (pin.stripe ? ' bbl-pin-striped' : '');
         b.textContent = pin.label; b.title = pin.title;
         b.style.setProperty('--c', pin.fill); b.style.setProperty('--s', pin.stripe || pin.fill); b.style.color = outlineFor(pin.fill);
-        b.dataset.label = pin.label; b.dataset.fill = pin.fill; b.dataset.stripe = pin.stripe || '';
+        b.dataset.id = pin.id; b.dataset.label = pin.label; b.dataset.fill = pin.fill; b.dataset.stripe = pin.stripe || '';
         grid.appendChild(b);
       }
     }
   }
 
-  togglePins(show = !this.style.pins) {
-    this.style.pins = !!show;
-    saveJSON(STYLE_KEY, this.style);
-    this.pinsEl.hidden = !this.style.pins;
-    this.pinsBtn.classList.toggle('bbl-on', this.style.pins);
-    if (!this.style.pins) this.disarm();
+  togglePins(show = !this.pinsShown) {
+    this.pinsShown = !!show;
+    this.pinsEl.hidden = !this.pinsShown;
+    this.pinsBtn.classList.toggle('bbl-on', this.pinsShown);
+    if (!this.pinsShown) this.disarm();
     this.refresh();                               // the photo area changed width
+  }
+
+  /** Ids of the pins already on a photo. A label placed from the panel carries its pin id; a typed label
+   *  counts too when its text and colour are exactly a pin's (one pin per such label). */
+  usedPins(im = this.current) {
+    const used = new Set();
+    if (!im) return used;
+    for (const lb of im.labels) {
+      if (lb.pin) { used.add(lb.pin); continue; }
+      const p = PINS.find((q) => !used.has(q.id) && q.label === lb.text && q.fill === lb.fill && (q.stripe || null) === (lb.stripe || null));
+      if (p) used.add(p.id);
+    }
+    return used;
   }
 
   /** A pin was clicked: the next click (or drag) on the photo places a label with that pin's name and wire colour. */
   armPin(pin) {
-    const same = this.armed && this.armed.label === pin.label && this.armed.fill === pin.fill && (this.armed.stripe || null) === (pin.stripe || null);
-    if (same) { this.disarm(); return; }
+    if (this.armed && this.armed.id === pin.id) { this.disarm(); return; }
     if (!this.current) { this.flash('Open a photo first.'); return; }
+    if (this.usedPins().has(pin.id)) { this.flash(`${pin.label} is already on this photo.`); return; }
     this.commitEntry();
-    this.armed = { label: pin.label, fill: pin.fill, stripe: pin.stripe || null };
+    this.armed = { id: pin.id, label: pin.label, fill: pin.fill, stripe: pin.stripe || null };
     this.selected = null;
-    this.markPin();
     this.refresh();
   }
   disarm() {
     if (!this.armed) return;
     this.armed = null;
-    this.markPin();
     this.refresh();
   }
-  markPin() {
+  /** Panel state from the photo: the armed pin is highlighted, pins already on the photo are greyed out. */
+  updatePins() {
+    const used = this.usedPins();
+    if (this.armed && used.has(this.armed.id)) this.armed = null;   // e.g. Y put its label back while it was armed
     const a = this.armed;
     this.stage.classList.toggle('bbl-armed', !!a);
-    for (const b of this.pinsEl.querySelectorAll('.bbl-pin')) b.classList.toggle('bbl-on', !!a && b.dataset.label === a.label && b.dataset.fill === a.fill && b.dataset.stripe === (a.stripe || ''));
+    for (const b of this.pinsEl.querySelectorAll('.bbl-pin')) {
+      const isUsed = used.has(b.dataset.id);
+      b.classList.toggle('bbl-on', !!a && b.dataset.id === a.id);
+      b.classList.toggle('bbl-pin-used', isUsed);
+      b.disabled = isUsed;
+      b.title = isUsed ? `${b.dataset.label} is already on this photo` : (pinById(b.dataset.id) || {}).title || b.dataset.label;
+    }
   }
   placeArmed(pos, tip) {
-    const { label, fill, stripe } = this.armed;
-    this.disarm();
+    const { id, label, fill, stripe } = this.armed;
+    this.armed = null;
     this.snapshot();
-    this.current.labels.push({ x: pos[0], y: pos[1], text: label, tip, fill, stripe, marker: this.style.markerPct });
+    this.current.labels.push({ x: pos[0], y: pos[1], text: label, tip, fill, stripe, marker: this.style.markerPct, pin: id });
     this.selected = this.current.labels.length - 1;
     this.changed();
   }
@@ -569,7 +591,8 @@ export class Labeler {
     this.pinsEl.addEventListener('click', (e) => {
       const b = e.target.closest('button'); if (!b) return;
       if (b.dataset.act === 'pins') { this.togglePins(false); return; }
-      if (b.dataset.label) this.armPin({ label: b.dataset.label, fill: b.dataset.fill, stripe: b.dataset.stripe || null });
+      const pin = pinById(b.dataset.id);
+      if (pin && !b.disabled) this.armPin(pin);
     });
     this.formatSelect.addEventListener('change', () => this.setFormat(this.formatSelect.value));
     this.dialogEl.addEventListener('click', (e) => {
@@ -1276,7 +1299,7 @@ export class Labeler {
     const cw = parseFloat(this.canvas.style.width), ch = parseFloat(this.canvas.style.height);
     ctx.clearRect(0, 0, cw, ch);
     this.dropEl.hidden = !!im;
-    if (!im || !im.bitmap) { this.boxes = []; this.status(); return; }
+    if (!im || !im.bitmap) { this.boxes = []; this.updatePins(); this.status(); return; }
     const dw = im.width * this.scale, dh = im.height * this.scale;
     ctx.drawImage(this.baseFor(im, dw, dh), this.offset[0], this.offset[1], dw, dh);
     this.boxes = drawLabels(ctx, im.labels, im.width, this.style, this.scale, this.offset[0], this.offset[1]);
@@ -1287,6 +1310,7 @@ export class Labeler {
     }
     if (this.rubber) this.drawPreview(this.rubber.text, this.rubber.tip, this.armed ? this.armed.fill : this.style.fill, this.style.markerPct);
     if (this.entry) this.drawPreview(this.entry.disp, this.entry.tipDisp, this.entry.fill, this.style.markerPct);
+    this.updatePins();
     this.status();
   }
   drawPreview(text, tip, fill, markerPct) {
@@ -1410,7 +1434,7 @@ export class Labeler {
     this.cancelEntry();
     const im = this.current;
     if (editing !== null) {
-      if (text !== im.labels[editing].text) this.snapshot();
+      if (text !== im.labels[editing].text) { this.snapshot(); delete im.labels[editing].pin; }   // renamed: no longer that pin
       if (text) im.labels[editing].text = text;
       else { im.labels.splice(editing, 1); this.selected = null; }
       this.changed();

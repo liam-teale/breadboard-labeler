@@ -27,7 +27,9 @@ it works offline.
    **Pins:** the panel on the right is the Analog Discovery 2 / 3 connector in its wire colours.
    Click a pin, then click its wire on the photo (or drag from the wire to where the text should go):
    the label is placed at once with the pin's name and the wire's colour, white stripe included.
-   The **Pins** button hides and shows the panel.
+   Each pin can be on a photo once: while it is there, it is greyed out in the panel (the four
+   grounds count separately). Delete the label and the pin comes back. The **Pins** button hides
+   and shows the panel; it is shown again on every load.
    The **↺ / ↻** buttons (or R / Shift-R) **rotate the photo** in 90° steps. Labels turn with it and stay
    on their parts; the saved copy comes out rotated. Undo turns it back.
 4. **Save** writes `name_labeled.jpg` and moves to the next photo. **Save all** does every
