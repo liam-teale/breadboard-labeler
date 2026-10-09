@@ -280,6 +280,12 @@ export function drawRotated(ctx, bitmap, rotation, w, h) {
   ctx.restore();
 }
 
+/** DOM writes that happen every frame during a drag: skip them when nothing changed, because any
+ *  write invalidates layout and the next pointer event then pays for a synchronous reflow. */
+function setText(el, text) { if (el.textContent !== text) el.textContent = text; }
+function setValue(input, value) { if (input.value !== value) input.value = value; }
+function setClass(el, cls, on) { if (el.classList.contains(cls) !== on) el.classList.toggle(cls, on); }
+
 function loadJSON(key, fallback) {
   try { const v = JSON.parse(localStorage.getItem(key)); return v ?? fallback; } catch { return fallback; }
 }
@@ -413,7 +419,7 @@ export class Labeler {
     this.saveToSelect.hidden = !FS_ACCESS;
     this.saveToSelect.value = this.style.saveTo;
     this.canvas = c.querySelector('.bbl-canvas');
-    this.ctx = this.canvas.getContext('2d');
+    this.ctx = this.canvas.getContext('2d', { alpha: false });   // opaque: nothing to blend, cheaper to composite
     this.entryEl = c.querySelector('.bbl-entry');
     this.statusEl = c.querySelector('.bbl-status');
     this.countEl = c.querySelector('.bbl-count');
@@ -448,6 +454,7 @@ export class Labeler {
         grid.appendChild(b);
       }
     }
+    this.pinButtons = [...grid.querySelectorAll('.bbl-pin')];
   }
 
   togglePins(show = !this.pinsShown) {
@@ -491,13 +498,15 @@ export class Labeler {
     const used = this.usedPins();
     if (this.armed && used.has(this.armed.id)) this.armed = null;   // e.g. Y put its label back while it was armed
     const a = this.armed;
-    this.stage.classList.toggle('bbl-armed', !!a);
-    for (const b of this.pinsEl.querySelectorAll('.bbl-pin')) {
+    setClass(this.stage, 'bbl-armed', !!a);
+    for (const b of this.pinButtons) {
       const isUsed = used.has(b.dataset.id);
-      b.classList.toggle('bbl-on', !!a && b.dataset.id === a.id);
-      b.classList.toggle('bbl-pin-used', isUsed);
-      b.disabled = isUsed;
-      b.title = isUsed ? `${b.dataset.label} is already on this photo` : (pinById(b.dataset.id) || {}).title || b.dataset.label;
+      setClass(b, 'bbl-on', !!a && b.dataset.id === a.id);
+      if (b.disabled !== isUsed) {
+        b.disabled = isUsed;
+        setClass(b, 'bbl-pin-used', isUsed);
+        b.title = isUsed ? `${b.dataset.label} is already on this photo` : (pinById(b.dataset.id) || {}).title || b.dataset.label;
+      }
     }
   }
   placeArmed(pos, tip) {
@@ -1222,7 +1231,9 @@ export class Labeler {
     if (this.canvas.width !== Math.round(cw * dpr) || this.canvas.height !== Math.round(ch * dpr)) {
       this.canvas.width = Math.round(cw * dpr); this.canvas.height = Math.round(ch * dpr);
     }
-    this.canvas.style.width = `${cw}px`; this.canvas.style.height = `${ch}px`;
+    const sw = `${cw}px`, sh = `${ch}px`;
+    if (this.canvas.style.width !== sw) this.canvas.style.width = sw;
+    if (this.canvas.style.height !== sh) this.canvas.style.height = sh;
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     if (!im || !im.bitmap) return;
     this.scale = Math.min(cw / im.width, ch / im.height);
@@ -1236,7 +1247,12 @@ export class Labeler {
     return [ix, iy];
   }
   toDisplay(ix, iy) { return [ix * this.scale + this.offset[0], iy * this.scale + this.offset[1]]; }
-  pos(e) { const r = this.canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
+  /** Pointer position in canvas pixels. The canvas rectangle is measured once per press and reused for the
+   *  whole drag: measuring it on every move would force the browser to lay the page out again each time. */
+  pos(e) {
+    if (!this.press || !this.rect) this.rect = this.canvas.getBoundingClientRect();
+    return [e.clientX - this.rect.left, e.clientY - this.rect.top];
+  }
   markerDisp(lb) { return Math.max(4, (this.current.width * lb.marker) / 100 * this.scale); }
   hitTip(x, y) {
     const { lineW } = metrics(this.current.width, this.style, this.scale);
@@ -1290,7 +1306,7 @@ export class Labeler {
     const im = this.current;
     const ctx = this.ctx;
     const cw = parseFloat(this.canvas.style.width), ch = parseFloat(this.canvas.style.height);
-    ctx.clearRect(0, 0, cw, ch);
+    ctx.fillStyle = '#101010'; ctx.fillRect(0, 0, cw, ch);     // the stage colour (the canvas is opaque)
     this.dropEl.hidden = !!im;
     if (!im || !im.bitmap) { this.boxes = []; this.updatePins(); this.status(); return; }
     const dw = im.width * this.scale, dh = im.height * this.scale;
@@ -1319,17 +1335,17 @@ export class Labeler {
   status(extra) {
     const im = this.current;
     const s = this.style;
-    this.countEl.textContent = im ? `${this.index + 1}/${this.images.length}` : '0/0';
-    if (!im) { this.statusEl.textContent = extra || 'Open some photos to start. Photos stay on your device.'; return; }
+    setText(this.countEl, im ? `${this.index + 1}/${this.images.length}` : '0/0');
+    if (!im) { setText(this.statusEl, extra || 'Open some photos to start. Photos stay on your device.'); return; }
     const sel = this.selected !== null && im.labels[this.selected] ? `  ·  selected: "${im.labels[this.selected].text}"` : '';
     const where = FS_ACCESS && s.saveTo === 'folder' && im.dir ? ' into its folder' : ' to Downloads';
     const rot = im.rotation ? `  ·  rotated ${im.rotation}°` : '';
     const base = `${im.name}${im.dirty ? ' *' : ''}  ·  labels: ${im.labels.length}${sel}${rot}  ·  text ${s.fontPct}%  square ${s.markerPct}%  colour ${s.fill}  ·  saves as ${s.format.toUpperCase()}${where}`;
     const lead = extra || (this.armed ? `Placing ${this.armed.label}: click its wire on the photo, or drag from the wire to where the text should go. Esc cancels.` : '');
-    this.statusEl.textContent = lead ? `${lead}   |   ${base}` : base;
+    setText(this.statusEl, lead ? `${lead}   |   ${base}` : base);
     const col = this.currentColour();
-    this.colourInput.value = col;
-    if (document.activeElement !== this.hexInput) this.hexInput.value = col;
+    setValue(this.colourInput, col.toLowerCase());             // a colour input normalises to lower case; compare like for like
+    if (document.activeElement !== this.hexInput) setValue(this.hexInput, col);
   }
   flash(text) {
     this.status(text);
@@ -1342,6 +1358,7 @@ export class Labeler {
     if (!this.current || !this.current.bitmap || e.button !== 0) return;
     if (this.entry) this.commitEntry();
     try { this.canvas.setPointerCapture(e.pointerId); } catch { /* synthetic event */ }
+    this.rect = null;                              // measure once for this press
     const [x, y] = this.pos(e);
     this.press = [x, y]; this.moved = false; this.shift = e.shiftKey;
     let i = this.hitTip(x, y);
