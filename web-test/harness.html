@@ -325,6 +325,15 @@
         check(redraws === 0, `20 pointer moves triggered no synchronous redraws (${redraws})`);
         await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
         check(redraws === 1, `then exactly one redraw on the next frame (${redraws})`);
+        // a drag frame must not touch the page around the canvas: any DOM write there forces a layout on the next pointer event
+        const mo = new MutationObserver(() => {}); mo.observe(app.container, { subtree: true, childList: true, attributes: true, characterData: true });
+        const r0 = rect();                                   // measured once here, so only the app's own measurements are counted below
+        let rects = 0; const origRect = app.canvas.getBoundingClientRect; app.canvas.getBoundingClientRect = function () { rects++; return origRect.call(this); };
+        for (let i = 21; i <= 40; i++) c.dispatchEvent(new PointerEvent('pointermove', { clientX: r0.left + p0[0] + 10 + i, clientY: r0.top + p0[1] + 10 + i, bubbles: true, pointerId: 1, isPrimary: true, button: 0, buttons: 1, pointerType: 'mouse' }));
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const muts = mo.takeRecords(); mo.disconnect(); app.canvas.getBoundingClientRect = origRect;
+        check(muts.length === 0, `a drag frame makes no DOM writes outside the canvas (${muts.length}: ${muts.slice(0, 3).map((m) => m.type + ':' + (m.attributeName || m.target.nodeName)).join(', ')})`);
+        check(rects === 0, `the canvas rectangle is not re-measured on every pointer move (${rects} measurements for 20 moves)`);
         ptr('pointerup', [p0[0] + 30, p0[1] + 30]);
         app.refresh = orig;
         const b1 = app.base && app.base.canvas; app.refresh(); const b2 = app.base && app.base.canvas;
