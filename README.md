@@ -92,8 +92,11 @@ you can chain click, type, click, type without pressing Enter.
   photo and a 1200 px screenshot. Output is full resolution.
 - Photos with EXIF rotation are shown and saved upright. A rotation you apply on top is remembered
   per photo (with its labels) and applied when drawing, so it costs no extra memory.
-- Only the current photo and its two neighbours are kept decoded in memory, so opening a whole
-  folder of 12 MP photos is fine. Nothing runs while you are not interacting.
+- Moving between photos is instant once they have been decoded: right after a photo opens, the ten
+  photos either side of it are decoded in the background, one at a time, into screen-sized previews
+  (about 17 MB each). Full resolution (about 48 MB for 12 MP) is kept only for the current photo and
+  its two neighbours, and is decoded again when saving needs it, so opening a whole folder of 12 MP
+  photos is fine. A HEIC takes about a second to decode the first time.
 - HEIC files are decoded in the browser with [heic-to](https://github.com/hoppergee/heic-to)
   (libheif 1.22, including the 10-bit HDR files newer iPhones shoot), downloaded the first time one
   is opened (about 3 MB) and cached for offline use after that.

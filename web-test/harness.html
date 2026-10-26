@@ -295,24 +295,50 @@
       } catch { out.push('INFO old decoder could not be loaded for comparison'); }
       const bad = new File([new Uint8Array([1, 2, 3, 4])], 'broken.heic', { type: 'image/heic' });
       await app4.openFiles([bad]); await app4.load(2);
-      check(app4.images.length === 2 && app4.index === 1 && !!app4.current.bitmap && app4.statusEl.textContent.includes('Could not open'),
+      check(app4.images.length === 2 && app4.index === 1 && app4.shown() && app4.statusEl.textContent.includes('Could not open'),
         `a broken file is reported and dropped, not fatal (images=${app4.images.length}, index=${app4.index}, status="${app4.statusEl.textContent}")`);
       app4.container.remove();
 
-      // ---- memory: decode on demand, keep only current +/- 1 -------------------
+      // ---- memory: full resolution for current +/- 1, previews within PREVIEW_RADIUS (10) ----
       const app5 = new Labeler(document.createElement('div'), { resume: false });
       document.body.appendChild(app5.container);
       const many = [];
-      for (let i = 0; i < 5; i++) many.push(await toFile(makeBoard(300, 200), `m${i}.png`, 'image/png'));
-      await app5.openFiles(many); await tick(300);
-      const decoded = () => app5.images.map((im, i) => (im.bitmap ? i : null)).filter((i) => i !== null);
-      check(app5.index === 0 && app5.current.bitmap && decoded().length <= 2, `opening 5 photos decodes at most the first two: ${JSON.stringify(decoded())}`);
-      await app5.load(4); await tick(300);
-      check(app5.images[0].bitmap === null && app5.images[1].bitmap === null && app5.images[4].bitmap && decoded().length <= 2,
-        `far photos are evicted after navigating: decoded=${JSON.stringify(decoded())}`);
+      for (let i = 0; i < 14; i++) many.push(await toFile(makeBoard(300, 200), `m${i}.png`, 'image/png'));
+      const idle = async (a) => { for (let i = 0; i < 200 && (a._prefetching || a.images.some((im) => im.decoding)); i++) await tick(20); };
+      const which = (f) => app5.images.map((im, i) => (f(im) ? i : null)).filter((i) => i !== null);
+      await app5.openFiles(many); await idle(app5);
+      check(app5.index === 0 && JSON.stringify(which((im) => im.bitmap)) === '[0,1]', `opening 14 photos keeps full resolution for the first two only: ${JSON.stringify(which((im) => im.bitmap))}`);
+      check(JSON.stringify(which((im) => im.preview)) === JSON.stringify([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), `previews are prefetched out to 10 places: ${JSON.stringify(which((im) => im.preview))}`);
+      app5.container.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', bubbles: true }));
+      app5.container.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', bubbles: true }));
+      app5.container.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', bubbles: true }));
+      check(app5.index === 3 && app5.base && app5.base.im === app5.current && !app5.current.decoding && app5.statusEl.textContent.indexOf('Opening') < 0,
+        'N to a prefetched photo draws it at once, with no decode in between');
+      await app5.load(13); await idle(app5);
+      check(JSON.stringify(which((im) => im.bitmap)) === '[12,13]', `far photos lose full resolution after navigating: ${JSON.stringify(which((im) => im.bitmap))}`);
+      check(JSON.stringify(which((im) => im.preview)) === JSON.stringify([3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]), `and previews follow the current photo: ${JSON.stringify(which((im) => im.preview))}`);
       await app5.load(0);
       check(!!app5.current.bitmap && app5.current.width === 300, 'an evicted photo re-decodes when you come back');
       app5.container.remove();
+      // a photo bigger than the screen gets a separate, smaller preview; the screen draws from it and saving uses the full photo
+      {
+        const appP = new Labeler(document.createElement('div'), { resume: false });
+        appP.container.style.cssText = 'width: 600px; height: 400px';   // a stage smaller than the screen, as it always is outside a headless test
+        document.body.appendChild(appP.container);
+        const big = [];
+        for (let i = 0; i < 3; i++) big.push(await toFile(makeBoard(4000, 3000), `big${i}.png`, 'image/png'));
+        await appP.openFiles(big); await idle(appP);
+        const im = appP.current, lim = Math.max(screen.width, screen.height) * (window.devicePixelRatio || 1);
+        check(im.preview && im.preview !== im.bitmap && Math.max(im.preview.width, im.preview.height) <= lim + 1 && im.bitmap.width === 4000,
+          `preview ${im.preview && im.preview.width}x${im.preview && im.preview.height} fits the ${screen.width}x${screen.height} screen; full photo 4000 wide`);
+        check(appP.base && appP.base.src === im.preview && im.width === 4000 && im.height === 3000, 'the screen is drawn from the preview, in full-photo coordinates');
+        appP.dropBitmap(im);
+        check(appP.shown() && im.preview, 'dropping full resolution keeps the preview');
+        const blob = await appP.saveBlob(im);
+        const out = await createImageBitmap(blob);
+        check(out.width === 4000 && out.height === 3000, `saving re-decodes and writes the full-resolution photo (${out.width}x${out.height})`);
+        appP.container.remove();
+      }
 
       // ---- rendering: drag redraws are coalesced to one per frame -------------
       app.load(0); await tick(100);
@@ -402,7 +428,7 @@
         check(appR2.current.rotation === 0 && !(appR2.current.key in JSON.parse(localStorage.getItem('bbl.rotation'))), 'rotating back to 0 drops the stored entry');
         // the rotation survives the photo being evicted and re-decoded
         appR.rotate(90);                                        // now 180
-        appR.current.bitmap = null; await appR.load(0); await tick();
+        appR.dropBitmap(appR.current); appR.dropPreview(appR.current); await appR.load(0); await tick();
         check(appR.current.rotation === 180 && appR.current.width === 400 && px(appR.renderFull(), 390, 290) === '#00FF00', 'rotation reapplied after a re-decode');
         appR.container.remove(); appR2.container.remove();
       }

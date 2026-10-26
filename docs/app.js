@@ -69,6 +69,9 @@ const LABELS_KEY = 'bbl.labels';
 const ROTATION_KEY = 'bbl.rotation';
 const ROTATIONS = [0, 90, 180, 270];
 const DRAG_THRESHOLD = 6;
+// Screen-sized previews (~17 MB each for a 12 MP photo on a 2880x1800 screen) are kept for photos up to
+// this many places from the current one, so stepping through them never waits for a decode.
+const PREVIEW_RADIUS = 10;
 // 0.85 is visually identical to 0.95 on a photo at half the file size.
 const JPEG_QUALITY = 0.85;
 
@@ -322,7 +325,7 @@ export class Labeler {
   constructor(container, opts = {}) {
     this.container = container;
     this.opts = opts;
-    this.images = [];          // {name, type, key, bitmap, width, height, labels, undo, redo, dirty}
+    this.images = [];          // {name, type, key, bitmap, preview, width, height, labels, undo, redo, dirty}
     this.index = -1;
     this.style = Object.assign({ fontPct: 3, markerPct: 2.5, fill: COLOURS[0], format: 'jpg', saveTo: 'folder' }, loadJSON(STYLE_KEY, {}));
     delete this.style.pins;                                    // an older build remembered the panel being hidden; it is shown on every load now
@@ -344,6 +347,7 @@ export class Labeler {
     this._cacheChain = Promise.resolve();
     this._raf = 0;
     this._loadToken = 0;
+    this._prefetching = false;
     this.entry = null;
     this.scale = 1; this.offset = [0, 0]; this.boxes = [];
     this.buildDom();
@@ -656,12 +660,13 @@ export class Labeler {
       const key = `${f.name}|${f.size}|${f.lastModified}`;
       if (this.images.some((im) => im.key === key)) continue;
       const stored = this.saved[key];
-      // Photos are decoded on demand (see ensure/trim): a 12 MP photo is ~48 MB decoded,
-      // so only the current one and its neighbours are kept in memory.
+      // Photos are decoded on demand (see ensure/trim): a 12 MP photo is ~48 MB decoded, so full
+      // resolution is kept only for the current one and its neighbours, and a screen-sized preview
+      // for the photos within PREVIEW_RADIUS.
       const im = {
         name: f.name, type: f.type, key, file: f, handle: e.handle || null, dir: e.dir || null, path: e.path || null,
         cacheName: cacheNameFor(key), cached: !!e.fromCache,
-        bitmap: null, decoding: null, broken: false, width: 0, height: 0,
+        bitmap: null, preview: null, decoding: null, broken: false, srcW: 0, srcH: 0, width: 0, height: 0,
         rotation: ROTATIONS.includes(this.rotations[key]) ? this.rotations[key] : 0,
         labels: stored ? stored.map((l) => ({ ...l })) : [], undo: [], redo: [], dirty: false,
       };
@@ -903,11 +908,13 @@ export class Labeler {
     return this.download(im);
   }
 
-  /** Decode a photo if it is not decoded yet. */
+  /** Decode a photo at full resolution if it is not decoded yet, making its preview on the way. */
   ensure(im) {
     if (im.bitmap) return Promise.resolve(im.bitmap);
     if (!im.decoding) {
-      im.decoding = this.decode(im.file).then((bmp) => {
+      im.decoding = this.decode(im.file).then(async (bmp) => {
+        im.srcW = bmp.width; im.srcH = bmp.height;
+        if (!im.preview) im.preview = await this.makePreview(bmp);
         im.bitmap = bmp; this.applyDims(im); im.decoding = null;
         return bmp;
       }, (err) => { im.decoding = null; im.broken = true; throw err; });
@@ -915,24 +922,64 @@ export class Labeler {
     return im.decoding;
   }
 
-  /** Free decoded pixels for photos that are not the current one or its neighbours. */
+  /** What the screen shows: the preview, or the full photo while there is no preview. */
+  shown(im = this.current) { return !!im && !!(im.preview || im.bitmap); }
+
+  /** A copy of a decoded photo scaled down to fit the screen (the photo itself if it is no bigger). */
+  async makePreview(bmp) {
+    const dpr = window.devicePixelRatio || 1;
+    const long = Math.max(screen.width, screen.height) * dpr, short = Math.min(screen.width, screen.height) * dpr;
+    const k = Math.min(long / Math.max(bmp.width, bmp.height), short / Math.min(bmp.width, bmp.height));
+    if (!(k > 0 && k < 1)) return bmp;
+    try {
+      return await createImageBitmap(bmp, { resizeWidth: Math.round(bmp.width * k), resizeHeight: Math.round(bmp.height * k), resizeQuality: 'high' });
+    } catch { return bmp; }
+  }
+
+  /** Free a photo's full-resolution pixels (a small photo is its own preview, which stays). */
+  dropBitmap(im) {
+    if (im.bitmap && im.bitmap !== im.preview && typeof im.bitmap.close === 'function') im.bitmap.close();
+    im.bitmap = null;
+  }
+  dropPreview(im) {
+    if (im.preview && im.preview !== im.bitmap && typeof im.preview.close === 'function') im.preview.close();
+    im.preview = null;
+  }
+
+  /** Keep full resolution for the current photo and its neighbours, previews within PREVIEW_RADIUS. */
   trim() {
     this.images.forEach((im, i) => {
-      if (Math.abs(i - this.index) <= 1 || !im.bitmap || im.decoding) return;
-      if (typeof im.bitmap.close === 'function') im.bitmap.close();
-      im.bitmap = null;
+      if (im.decoding) return;
+      const d = Math.abs(i - this.index);
+      if (d > 1) this.dropBitmap(im);
+      if (d > PREVIEW_RADIUS) this.dropPreview(im);
     });
   }
 
-  /** Decode the neighbours in the background so N/P feel instant. */
-  prefetch() {
-    const run = () => {
-      for (const j of [this.index + 1, this.index - 1]) {
-        const im = this.images[j];
-        if (im && !im.bitmap && !im.broken) this.ensure(im).catch(() => {});
+  /** Decode in the background, one photo at a time, nearest first: the current photo at full
+   *  resolution (saving needs it), then previews of the photos around it so N/P never wait.
+   *  Each round looks again from wherever the current photo is by then. */
+  async prefetch() {
+    if (this._prefetching) return;
+    this._prefetching = true;
+    try {
+      for (let im = this.nextPrefetch(); im; im = this.nextPrefetch()) {
+        await this.ensure(im).catch(() => {});
+        this.trim();
       }
-    };
-    (window.requestIdleCallback || ((f) => setTimeout(f, 50)))(run);
+    } finally { this._prefetching = false; }
+  }
+  nextPrefetch() {
+    const cur = this.current;
+    if (!cur) return null;
+    if (!cur.bitmap && !cur.broken) return cur;
+    for (let d = 1; d <= PREVIEW_RADIUS; d++) {
+      for (const j of [this.index + d, this.index - d]) {
+        const im = this.images[j];
+        if (im && !im.preview && !im.broken) return im;
+      }
+    }
+    return null;
   }
 
   async decode(file) {
@@ -942,7 +989,7 @@ export class Labeler {
       try { converted = await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch { /* browser cannot decode HEIC natively */ }
       if (converted) return converted;
       const { heicTo } = await this.loadHeicDecoder();
-      blob = await heicTo({ blob: file, type: 'image/png' });
+      return heicTo({ blob: file, type: 'bitmap' });   // straight to pixels: going through a PNG took half as long again
     }
     try {
       return await createImageBitmap(blob, { imageOrientation: 'from-image' });
@@ -981,7 +1028,7 @@ export class Labeler {
     this.selected = null;
     const im = this.current;
     const token = ++this._loadToken;
-    if (!im.bitmap) {
+    if (!this.shown(im)) {
       this.refresh();
       this.status(`Opening ${im.name}...`);
       try {
@@ -1097,8 +1144,7 @@ export class Labeler {
     this._loadToken++;                           // a decode in flight for this photo must not finish into the queue
     this.cancelEntry();
     this.images.splice(i, 1);
-    if (im.bitmap && typeof im.bitmap.close === 'function') im.bitmap.close();
-    im.bitmap = null;
+    this.dropBitmap(im); this.dropPreview(im);
     if (this.base && this.base.im === im) this.base = null;
     if (this.images.length) {
       const next = i < this.index ? this.index - 1 : Math.min(this.index, this.images.length - 1);
@@ -1187,15 +1233,15 @@ export class Labeler {
   }
 
   // ---- rotation -------------------------------------------------------- //
-  /** Displayed size of a decoded photo: the bitmap's size, swapped at 90 and 270 degrees. */
+  /** Displayed size of a decoded photo: its full-resolution size, swapped at 90 and 270 degrees. */
   applyDims(im) {
-    const b = im.bitmap, quarter = im.rotation % 180 !== 0;
-    im.width = quarter ? b.height : b.width;
-    im.height = quarter ? b.width : b.height;
+    const quarter = im.rotation % 180 !== 0;
+    im.width = quarter ? im.srcH : im.srcW;
+    im.height = quarter ? im.srcW : im.srcH;
   }
   setRotation(im, deg) {
     im.rotation = ((deg % 360) + 360) % 360;
-    if (im.bitmap) this.applyDims(im);
+    if (im.srcW) this.applyDims(im);
     if (this.base && this.base.im === im) this.base = null;    // the screen-sized copy is stale
   }
   /** Rotate the current photo by 90 degrees (delta > 0 clockwise). Labels turn with it: their
@@ -1203,7 +1249,7 @@ export class Labeler {
    *  percentages of the image width, so a label keeps its proportions. One Z undoes it. */
   rotate(delta) {
     const im = this.current;
-    if (!im || !im.bitmap) return false;
+    if (!this.shown(im)) return false;
     this.commitEntry();
     this.snapshot();
     const { width: w, height: h } = im;
@@ -1231,7 +1277,7 @@ export class Labeler {
     }
     this.canvas.style.width = `${cw}px`; this.canvas.style.height = `${ch}px`;
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (!im || !im.bitmap) return;
+    if (!this.shown(im)) return;
     this.scale = Math.min(cw / im.width, ch / im.height);
     const dw = im.width * this.scale, dh = im.height * this.scale;
     this.offset = [(cw - dw) / 2, (ch - dh) / 2];
@@ -1278,16 +1324,19 @@ export class Labeler {
   }
 
   /** The current photo pre-scaled to screen size, so a redraw is a cheap 1:1 blit
-   *  instead of rescaling the full-resolution photo every time. */
+   *  instead of rescaling the full-resolution photo every time. Drawn from the preview
+   *  unless the preview is smaller than the stage and the full photo is at hand. */
   baseFor(im, dw, dh) {
     const dpr = window.devicePixelRatio || 1;
     const pw = Math.max(1, Math.round(dw * dpr)), ph = Math.max(1, Math.round(dh * dpr));
+    const p = im.preview;
+    const src = im.bitmap && (!p || Math.max(p.width, p.height) < Math.max(pw, ph)) ? im.bitmap : (p || im.bitmap);
     const b = this.base;
-    if (b && b.im === im && b.canvas.width === pw && b.canvas.height === ph) return b.canvas;
+    if (b && b.im === im && b.src === src && b.canvas.width === pw && b.canvas.height === ph) return b.canvas;
     const canvas = document.createElement('canvas');
     canvas.width = pw; canvas.height = ph;
-    drawRotated(canvas.getContext('2d'), im.bitmap, im.rotation, pw, ph);
-    this.base = { im, canvas };
+    drawRotated(canvas.getContext('2d'), src, im.rotation, pw, ph);
+    this.base = { im, src, canvas };
     return canvas;
   }
 
@@ -1299,7 +1348,7 @@ export class Labeler {
     const cw = parseFloat(this.canvas.style.width), ch = parseFloat(this.canvas.style.height);
     ctx.clearRect(0, 0, cw, ch);
     this.dropEl.hidden = !!im;
-    if (!im || !im.bitmap) { this.boxes = []; this.updatePins(); this.status(); return; }
+    if (!this.shown(im)) { this.boxes = []; this.updatePins(); this.status(); return; }
     const dw = im.width * this.scale, dh = im.height * this.scale;
     ctx.drawImage(this.baseFor(im, dw, dh), this.offset[0], this.offset[1], dw, dh);
     this.boxes = drawLabels(ctx, im.labels, im.width, this.style, this.scale, this.offset[0], this.offset[1]);
@@ -1346,7 +1395,7 @@ export class Labeler {
 
   // ---- pointer --------------------------------------------------------- //
   onPress(e) {
-    if (!this.current || !this.current.bitmap || e.button !== 0) return;
+    if (!this.shown() || e.button !== 0) return;
     if (this.entry) this.commitEntry();
     try { this.canvas.setPointerCapture(e.pointerId); } catch { /* synthetic event */ }
     const [x, y] = this.pos(e);
