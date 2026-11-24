@@ -1291,23 +1291,34 @@ export class Labeler {
   toDisplay(ix, iy) { return [ix * this.scale + this.offset[0], iy * this.scale + this.offset[1]]; }
   pos(e) { const r = this.canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
   markerDisp(lb) { return Math.max(4, (this.current.width * lb.marker) / 100 * this.scale); }
-  hitTip(x, y) {
+  /** The label part under a display point: { i, part: 'box' | 'tip' }, or null. Labels are drawn in order,
+   *  each one's box over its own leader and square, so this looks from the top down and the first part
+   *  actually drawn under the point wins. Only when the point is on nothing do the grab margins count
+   *  (6 px round a box, at least 14 px from a square's centre), and then the nearest part wins, so a
+   *  margin never reaches through a label on top to grab one underneath. */
+  hitTest(x, y) {
     const { lineW } = metrics(this.current.width, this.style, this.scale);
     const ls = this.current.labels;
+    let near = null, nearD = Infinity;
+    const consider = (i, part, d, slack) => {
+      if (d <= slack && d < nearD) { near = { i, part }; nearD = d; }
+    };
     for (let i = ls.length - 1; i >= 0; i--) {
-      if (!ls[i].tip) continue;
-      const [tx, ty] = this.toDisplay(...ls[i].tip);
-      const reach = Math.max(14, this.markerDisp(ls[i]) / 2 + lineW);
-      if (Math.abs(x - tx) <= reach && Math.abs(y - ty) <= reach) return i;
+      const b = this.boxes[i];
+      if (b) {
+        const d = Math.max(b[0] - x, x - b[2], b[1] - y, y - b[3], 0);   // how far outside the box
+        if (d === 0) return { i, part: 'box' };
+        consider(i, 'box', d, 6);
+      }
+      if (ls[i].tip) {
+        const [tx, ty] = this.toDisplay(...ls[i].tip);
+        const half = this.markerDisp(ls[i]) / 2;
+        const d = Math.max(Math.abs(x - tx) - half, Math.abs(y - ty) - half, 0);   // how far outside the square
+        if (d === 0) return { i, part: 'tip' };
+        consider(i, 'tip', d, Math.max(14, half + lineW) - half);
+      }
     }
-    return null;
-  }
-  hitLabel(x, y) {
-    for (let i = this.boxes.length - 1; i >= 0; i--) {
-      const [x0, y0, x1, y1] = this.boxes[i];
-      if (x >= x0 - 6 && x <= x1 + 6 && y >= y0 - 6 && y <= y1 + 6) return i;
-    }
-    return null;
+    return near;
   }
   defaultTextPos(tip) {
     const { width: w, height: h } = this.current;
@@ -1400,9 +1411,11 @@ export class Labeler {
     try { this.canvas.setPointerCapture(e.pointerId); } catch { /* synthetic event */ }
     const [x, y] = this.pos(e);
     this.press = [x, y]; this.moved = false; this.shift = e.shiftKey;
-    let i = this.hitTip(x, y);
-    if (i !== null) { this.mode = 'tip'; this.selected = i; }
-    else if ((i = this.hitLabel(x, y)) !== null) {
+    // with a pin picked, a press always places it: its wire is often right next to another label's square
+    const hit = this.armed ? null : this.hitTest(x, y);
+    if (hit && hit.part === 'tip') { this.mode = 'tip'; this.selected = hit.i; }
+    else if (hit) {
+      const i = hit.i;
       this.mode = 'move'; this.selected = i;
       const [lx, ly] = this.toDisplay(this.current.labels[i].x, this.current.labels[i].y);
       this.grab = [x - lx, y - ly];
@@ -1443,8 +1456,9 @@ export class Labeler {
   }
   onDouble(e) {
     const [x, y] = this.pos(e);
-    const i = this.hitLabel(x, y);
-    if (i === null) return;
+    const hit = this.hitTest(x, y);
+    if (!hit || hit.part !== 'box') return;      // the text box on top under the pointer, not a square
+    const i = hit.i;
     this.cancelEntry();
     this.press = null; this.mode = null;
     this.selected = i;
