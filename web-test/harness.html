@@ -610,6 +610,105 @@
         app.load(0); await tick(100);
       }
 
+      // ---- a picked pin is placed even right next to (or on) another label -------------------
+      {
+        const im = app.current;
+        const saved = { labels: im.labels, undo: [...im.undo], redo: [...im.redo], dirty: im.dirty };
+        const T = [1200, 1800];                                   // the square of a pin already on the photo
+        im.labels = [{ x: 900, y: 1500, text: '1+', tip: [...T], fill: '#FF9800', stripe: null, marker: 1, pin: '1+' }];
+        app.selected = null; app.refresh();
+        const tD = app.toDisplay(...T);
+        const half = app.markerDisp(im.labels[0]) / 2;
+        const placed = () => im.labels.at(-1);
+        const tipKept = () => near(im.labels[0].tip[0], T[0], 0.5) && near(im.labels[0].tip[1], T[1], 0.5);
+        const atD = (pt, d) => { const [ix, iy] = app.toImage(...d); return near(pt[0], ix, 1) && near(pt[1], iy, 1); };
+        const beside = [tD[0] + half + 6, tD[1]];                 // the next hole over: off the square, inside its grab margin
+        check(half + 6 < 14, `setup: the click beside the square is inside its 14 px grab margin (half ${half.toFixed(1)} px)`);
+        ptr('pointerdown', beside);
+        check(app.mode === 'tip' && app.selected === 0, 'with no pin picked, a click beside a square grabs it');
+        ptr('pointerup', beside);
+        app.armPin(pinById('W1')); ptr('pointerdown', beside); ptr('pointerup', beside);
+        check(im.labels.length === 2 && placed().text === 'W1' && atD(placed().tip, beside) && tipKept() && !app.armed,
+          `a picked pin clicked right beside another label's square is placed there (${im.labels.map((l) => l.text)})`);
+        let p = [tD[0] + half * 0.5, tD[1] + half * 0.5];
+        app.armPin(pinById('2+')); ptr('pointerdown', p); ptr('pointerup', p);
+        check(im.labels.length === 3 && placed().text === '2+' && atD(placed().tip, p) && tipKept(), 'and when clicked on that square itself');
+        p = [tD[0] - half - 5, tD[1] + 3];
+        const rel = [p[0] - 120, p[1] + 90];
+        app.armPin(pinById('V+')); drag(p, rel);
+        check(im.labels.length === 4 && placed().text === 'V+' && atD(placed().tip, p) && atD([placed().x, placed().y], rel) && tipKept(),
+          'a drag from beside it places the pin too (text at the release point) and leaves the other square where it was');
+        p = app.toDisplay(im.labels[0].x, im.labels[0].y);
+        app.armPin(pinById('GND')); ptr('pointerdown', p); ptr('pointerup', p);
+        check(im.labels.length === 5 && placed().text === 'GND' && atD(placed().tip, p) && near(im.labels[0].x, 900, 0.5),
+          'and a click on another label\'s text places the pin rather than grabbing that label');
+        Object.assign(im, saved); app.selected = null; app.persist(); app.refresh();
+      }
+
+      // ---- overlapping labels: a click takes whatever is drawn on top ----------------------------
+      {
+        const im = app.current;
+        const saved = { labels: im.labels, undo: [...im.undo], redo: [...im.redo], dirty: im.dirty };
+        const T = [1200, 1800];
+        // the lower label's square is hidden under the upper label's text (labels are drawn in order)
+        im.labels = [
+          { x: 500, y: 2500, text: 'under', tip: [...T], fill: '#FFEB3B', marker: 1.5 },
+          { x: T[0], y: T[1], text: 'ON TOP OF IT', tip: null, fill: '#2962FF', marker: 2.5 },
+        ];
+        app.selected = null; app.refresh();
+        const tD = app.toDisplay(...T);
+        const half = app.markerDisp(im.labels[0]) / 2;
+        const bTop = app.boxes[1];
+        check(half < 14 && bTop[0] < tD[0] - 14 && bTop[2] > tD[0] + 14 && bTop[1] < tD[1] - half && bTop[3] > tD[1] + half,
+          'setup: the lower label\'s square and its grab margin sideways are under the upper label\'s text');
+        ptr('pointerdown', tD); ptr('pointerup', tD);
+        check(app.selected === 1, `clicking the label on top selects it, not the square hidden under it (selected ${app.selected})`);
+        const q = [tD[0] + (half + 14) / 2, tD[1]];               // on the top label, inside the hidden square's grab margin
+        app.selected = null; ptr('pointerdown', q); ptr('pointerup', q);
+        check(app.selected === 1, `and so does a click on it just beside that square (selected ${app.selected})`);
+        drag([tD[0] + 2, tD[1] + 2], [tD[0] + 2, tD[1] + 80]);
+        check(im.labels[1].y > T[1] + 100 && near(im.labels[0].tip[0], T[0], 0.5) && near(im.labels[0].tip[1], T[1], 0.5),
+          `dragging it moves the label on top; the square underneath stays put (top y ${Math.round(im.labels[1].y)})`);
+        key('z');
+        c.dispatchEvent(new MouseEvent('dblclick', { clientX: rect().left + tD[0], clientY: rect().top + tD[1], bubbles: true }));
+        check(!!app.entry && app.entry.editing === 1, 'double-click edits the label on top');
+        app.cancelEntry();
+
+        // a square drawn over a lower label's text is what a click there takes
+        im.labels = [
+          { x: 2000, y: 1000, text: 'lower label', tip: null, fill: '#FFEB3B', marker: 2.5 },
+          { x: 3000, y: 2000, text: 'C', tip: [2000, 1000], fill: '#FF66CC', marker: 1.5 },
+        ];
+        app.selected = null; app.refresh();
+        let p = app.toDisplay(2000, 1000);
+        ptr('pointerdown', p);
+        check(app.mode === 'tip' && app.selected === 1, 'a square drawn over a lower label\'s text grabs the square');
+        ptr('pointerup', p);
+        c.dispatchEvent(new MouseEvent('dblclick', { clientX: rect().left + p[0], clientY: rect().top + p[1], bubbles: true }));
+        check(!app.entry, 'and a double-click there does not edit the label hidden under it');
+
+        // the upper label's grab margin does not reach over the lower label where the lower one shows
+        im.labels = [
+          { x: 2000, y: 1000, text: 'lower label', tip: null, fill: '#FFEB3B', marker: 2.5 },
+          { x: 2000, y: 1000, text: 'upper', tip: null, fill: '#2962FF', marker: 2.5 },
+        ];
+        app.refresh();
+        const lowCx = app.toDisplay(2000, 1000)[0];
+        im.labels[1].x = app.toImage(lowCx + (app.boxes[1][2] - app.boxes[1][0]) / 2, 0)[0];   // upper box starts at the lower one's centre
+        app.selected = null; app.refresh();
+        const [l0, l1, l2, l3] = app.boxes[0], u0 = app.boxes[1][0];
+        check(l0 < u0 - 10 && l2 > u0 + 10, 'setup: the two text boxes overlap');
+        p = [u0 - 3, (l1 + l3) / 2];
+        ptr('pointerdown', p);
+        check(app.mode === 'move' && app.selected === 0, `a click on the lower label 3 px from the upper one's edge takes the lower label (selected ${app.selected})`);
+        ptr('pointerup', p);
+        p = [l0 + 5, l1 - 4];
+        app.selected = null; ptr('pointerdown', p);
+        check(app.mode === 'move' && app.selected === 0, 'a click just outside a label (nothing else near) still grabs it');
+        ptr('pointerup', p);
+        Object.assign(im, saved); app.selected = null; app.persist(); app.refresh();
+      }
+
       // ---- maths: $...$ in a label is typeset with MathJax --------------------------
       {
         check(JSON.stringify(splitMath('10 k$\\Omega$ pull-up')) === JSON.stringify([{ text: '10 k' }, { tex: '\\Omega' }, { text: ' pull-up' }]), 'splitMath separates text and TeX');

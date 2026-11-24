@@ -20,13 +20,14 @@ it works offline.
 2. **Click the part.** The square lands there and a text box opens beside it. Type, Enter.
    Or **drag** from the part to where the text should go.
 3. **Drag the text** or **the square** to move them. **Click a label** to select it,
-   **double-click** to edit its text.
+   **double-click** to edit its text. Where labels overlap, a click takes the one drawn on top.
    **Maths:** put TeX between dollar signs, `10 k$\Omega$` or `$V_{out}$`, and it is typeset with
    MathJax; the text around it stays as it is. The first such label downloads MathJax (about 2 MB,
    kept for offline use after that). Until it has rendered, the label shows the raw TeX.
    **Pins:** the panel on the right is the Analog Discovery 2 / 3 connector in its wire colours.
    Click a pin, then click its wire on the photo (or drag from the wire to where the text should go):
    the label is placed at once with the pin's name and the wire's colour, white stripe included.
+   While a pin is picked, a click on the photo always places it, even right next to another label.
    Each pin can be on a photo once: while it is there, it is greyed out in the panel (the four
    grounds count separately). Delete the label and the pin comes back. The **Pins** button hides
    and shows the panel; it is shown again on every load.
